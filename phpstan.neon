@@ -1,0 +1,8 @@
+parameters:
+    level: 8
+    paths:
+        - src
+        - tests/Static/routing-narrowing-static.php
+        - tests/Static/matrix-narrowing-static.php
+        - tests/Static/geocoding-narrowing-static.php
+    tmpDir: .phpstan.cache

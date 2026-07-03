@@ -1,0 +1,187 @@
+name: CI
+
+# PHP CI matrix (Linux × PHP 8.2/8.3/8.4) + lint gates.
+# Linux-only at v1.0 (cross-OS deferred). Enforces lint gates, PHPStan level 8,
+# and ≥80% line coverage in CI.
+# Mirrors `location-ts/.github/workflows/ci.yml` shape, scoped to PHP toolchain.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # --- PHP test matrix ---
+  test:
+    name: test (php ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.3', '8.4']
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup PHP ${{ matrix.php }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: xdebug
+          tools: composer:v2
+
+      - name: Get composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache composer dependencies
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-php-${{ matrix.php }}-composer-${{ hashFiles('**/composer.json') }}
+          restore-keys: ${{ runner.os }}-php-${{ matrix.php }}-composer-
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: PHPStan (level 8)
+        run: vendor/bin/phpstan analyse --no-progress
+
+      - name: PHPUnit with coverage
+        run: vendor/bin/phpunit --coverage-text --coverage-clover=coverage.xml
+
+      - name: Coverage gate (line coverage >= 80%)
+        run: |
+          php -r '
+            if (!is_file("coverage.xml")) { fwrite(STDERR, "coverage.xml missing\n"); exit(1); }
+            $xml = simplexml_load_file("coverage.xml");
+            if ($xml === false) { fwrite(STDERR, "could not parse coverage.xml\n"); exit(1); }
+            $m = $xml->project->metrics ?? null;
+            if ($m === null) { fwrite(STDERR, "no <project><metrics> in clover output\n"); exit(1); }
+            $statements = (int) $m["statements"];
+            $covered = (int) $m["coveredstatements"];
+            if ($statements === 0) { echo "no statements measured\n"; exit(0); }
+            $pct = ($covered / $statements) * 100;
+            printf("Line coverage: %.2f%% (%d / %d statements)\n", $pct, $covered, $statements);
+            if ($pct < 80.0) {
+              fwrite(STDERR, sprintf("::error::coverage %.2f%% below 80%% gate\n", $pct));
+              exit(1);
+            }
+          '
+
+      - name: PHP-CS-Fixer (PER-CS dry-run)
+        run: vendor/bin/php-cs-fixer fix --dry-run --diff
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-php-${{ matrix.php }}
+          path: coverage.xml
+          if-no-files-found: warn
+
+  # --- Lint gates ---
+  # Frontmatter validation + no-vendor-SDK check + MIT license.
+  # Runs once on the lowest-supported PHP (8.2) — these gates are PHP-version-independent.
+  lint-gates:
+    name: lint gates (frontmatter · license · no-sdk)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Validate per-connector README frontmatter
+        run: php scripts/validate-frontmatter.php --expected-blocks 21 --expected-providers 6
+
+      - name: Verify MIT license
+        run: |
+          php -r '
+            $p = json_decode(file_get_contents("composer.json"), true, 512, JSON_THROW_ON_ERROR);
+            if (($p["license"] ?? null) !== "MIT") {
+              fwrite(STDERR, "composer.json license must be MIT, got: " . json_encode($p["license"] ?? null) . "\n");
+              exit(1);
+            }
+            echo "OK — MIT license.\n";
+          '
+
+      - name: Verify no vendor SDKs in require
+        run: |
+          php -r '
+            $p = json_decode(file_get_contents("composer.json"), true, 512, JSON_THROW_ON_ERROR);
+            $require = $p["require"] ?? [];
+            $forbidden = ["google/apiclient", "google/maps", "mapbox/mapbox-sdk-php", "here/here-platform-php"];
+            $found = [];
+            foreach (array_keys($require) as $pkg) {
+              foreach ($forbidden as $bad) {
+                if (stripos($pkg, $bad) !== false) { $found[] = $pkg; }
+              }
+            }
+            if ($found) {
+              fwrite(STDERR, "Forbidden vendor SDKs in require: " . implode(", ", $found) . "\n");
+              exit(1);
+            }
+            echo "OK — no vendor SDKs in require.\n";
+          '
+
+  # --- Import-time smoke (no network) ---
+  # Confirms that loading the library and constructing a facade makes ZERO HTTP calls.
+  # Uses a stub PSR-18 client that throws on sendRequest(), AND runs inside a
+  # network NAMESPACE (`unshare -n`): no interface except an isolated loopback
+  # exists, so no egress is possible at any privilege level. The Actions runner
+  # agent lives OUTSIDE the namespace and keeps streaming logs. Do NOT swap this
+  # for host-wide firewall rules (iptables): they also kill the runner agent
+  # itself (same non-root `runner` user) and the job hangs until GitHub declares
+  # the runner lost.
+  import-smoke:
+    name: import-time smoke (no network)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Construct facade without network
+        run: |
+          sudo env "PATH=$PATH" unshare -n php -r '
+            require __DIR__ . "/vendor/autoload.php";
+            $stub = new class implements Psr\Http\Client\ClientInterface {
+              public function sendRequest(Psr\Http\Message\RequestInterface $r): Psr\Http\Message\ResponseInterface {
+                throw new RuntimeException("Unexpected import-time HTTP: " . $r->getMethod() . " " . (string) $r->getUri());
+              }
+            };
+            $cfg = new Thinwrap\Location\Config\GoogleConfig(apiKey: "k");
+            $r = new Thinwrap\Location\Routing(Thinwrap\Location\Enum\LocationProviderId::Google, $cfg, $stub);
+            if ($r->providerId !== Thinwrap\Location\Enum\LocationProviderId::Google) {
+              fwrite(STDERR, "expected providerId Google\n");
+              exit(1);
+            }
+            echo "OK — autoload + construction made zero HTTP calls.\n";
+          '
+
+      - name: Prove the namespace actually blocks egress
+        run: |
+          if sudo unshare -n curl -s --max-time 5 https://packagist.org/ > /dev/null 2>&1; then
+            echo "::error::Network namespace did not block egress — smoke gate is not actually offline."
+            exit 1
+          fi
+          echo "OK — egress blocked inside the namespace."
