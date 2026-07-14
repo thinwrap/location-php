@@ -1,6 +1,13 @@
 # `thinwrap/location` (PHP) — Conventions
 
 Naming, file layout, and test patterns for AI agents adding or refactoring a connector.
+The frontmatter is a **single block at the very top of the file** (opening `---` on
+line 1), with every operation keyed under `operations:`; the `# Title` follows the
+closing `---`. GitHub only renders a `---…---` block as (hidden) frontmatter when it
+leads the file — a block placed lower leaks its raw YAML into the page body. The
+validator scans to the first `---`, so it will **not** catch a misplaced block; keep
+it on top.
+
 The per-connector README frontmatter schema authoritative source is
 [`../schemas/connector-readme-schema.yaml`](../schemas/connector-readme-schema.yaml).
 
@@ -34,7 +41,7 @@ src/
     TravelMode.php                            # 'driving'|'walking'|'cycling'
     IsochroneType.php                         # 'time'|'distance'
   Providers/<Provider>/
-    README.md                                 # per-operation YAML frontmatter blocks + body
+    README.md                                 # top-of-file YAML frontmatter (operations map) + body
     DTO/                                      # optional per-provider narrowed input types
     Enum/                                     # optional per-provider enums
   Util/
@@ -87,7 +94,7 @@ enum LocationProviderId: string
 | `src/Config/<Provider>Config.php` | yes | Exported `<Provider>Config` DTO (shared across ops) |
 | `src/Providers/<Provider>/DTO/<Provider><Op>Options.php` | optional | Per-provider narrowed input type (for augmentations beyond baseline) |
 | `src/Providers/<Provider>/Enum/<Provider><Concept>.php` | optional | Per-provider narrowed enum (e.g. `HereTransportMode`) |
-| `src/Providers/<Provider>/README.md` | yes | Per-operation YAML frontmatter blocks + body |
+| `src/Providers/<Provider>/README.md` | yes | Top-of-file YAML frontmatter (operations map) + body |
 
 ## `mapVendorError(int $status, mixed $body): ProviderCode` pattern
 

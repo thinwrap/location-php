@@ -6,12 +6,13 @@ declare(strict_types=1);
  * Per-connector README frontmatter validator — PHP mirror of
  * `scripts/validate-frontmatter.mjs` in `location-ts`.
  *
- * Reads every `src/Providers/<Provider>/README.md`, parses ALL YAML
- * frontmatter blocks (each delimited by `---` markers; location scope uses
- * one block per operation within a single per-provider file), and validates
+ * Reads every `src/Providers/<Provider>/README.md`, parses the single leading YAML
+ * frontmatter block at the top of the file (`providerId` plus an `operations:` map
+ * keyed by operation — one entry per operation the provider supports), and validates
  * required keys and value shapes against the schema documented in
  * `schemas/connector-readme-schema.yaml`. Exits 0 on success, 1 with
- * line-prefixed errors on any failure.
+ * line-prefixed errors on any failure. `--expected-blocks` counts total operations
+ * across all READMEs.
  *
  * Wired into the CI lint-gates job. Standalone (no runtime deps; no
  * `symfony/yaml`) so it can run pre-commit too. Minimal parser scoped to the
@@ -218,61 +219,37 @@ function parseFrontmatter(string $text): array
 }
 
 /**
- * A "frontmatter block" is an opening `---` line followed (after optional
- * blank lines) by at least one YAML mapping key (`<word>:`) and closed by
- * another `---` line. `---` lines NOT followed by a YAML mapping (markdown
- * thematic-break separators between sections) are skipped.
+ * Location READMEs carry ONE leading YAML frontmatter block at the very top of
+ * the file (opening `---` on line 1, so GitHub renders it as real frontmatter),
+ * with every operation keyed under `operations:`. Extract that single block:
+ * scan to the first `---`, parse through the matching close. A leading `# title`
+ * before the block (if any) is skipped; markdown thematic-break `---` separators
+ * later in the body are not part of the block.
+ *
+ * @return array{startLine: int, meta: array<string, mixed>}|null
  */
-function looksLikeYamlMappingStart(string $line): bool
+function extractLeadingFrontmatter(string $content, string $file): ?array
 {
-    if ($line === '') {
-        return false;
-    }
-    if (preg_match('/^[-*#`>|]/', $line) === 1) {
-        return false;
-    }
-    return preg_match('/^[A-Za-z_][A-Za-z0-9_-]*\s*:(\s.*)?$/', $line) === 1;
-}
-
-/**
- * @return list<array{startLine: int, endLine: int, meta: array<string, mixed>}>
- */
-function extractFrontmatterBlocks(string $content, string $file): array
-{
-    $blocks = [];
     /** @var list<string> $lines */
     $lines = explode("\n", $content);
     $i = 0;
-    while ($i < count($lines)) {
-        if (trim($lines[$i]) === '---') {
-            $p = $i + 1;
-            while ($p < count($lines) && trim($lines[$p]) === '') {
-                $p++;
-            }
-            if ($p >= count($lines) || !looksLikeYamlMappingStart($lines[$p])) {
-                $i++;
-                continue;
-            }
-            $j = $i + 1;
-            while ($j < count($lines) && trim($lines[$j]) !== '---') {
-                $j++;
-            }
-            if ($j >= count($lines)) {
-                throw new RuntimeException(sprintf('%s: unterminated frontmatter block starting at line %d', $file, $i + 1));
-            }
-            $yamlText = implode("\n", array_slice($lines, $i + 1, $j - $i - 1));
-            [$meta, ] = parseFrontmatter($yamlText);
-            $blocks[] = [
-                'startLine' => $i + 1,
-                'endLine' => $j + 1,
-                'meta' => $meta,
-            ];
-            $i = $j + 1;
-        } else {
-            $i++;
-        }
+    while ($i < count($lines) && trim($lines[$i]) !== '---') {
+        $i++;
     }
-    return $blocks;
+    if ($i >= count($lines)) {
+        return null;
+    }
+    $startLine = $i + 1;
+    $j = $i + 1;
+    while ($j < count($lines) && trim($lines[$j]) !== '---') {
+        $j++;
+    }
+    if ($j >= count($lines)) {
+        throw new RuntimeException(sprintf('%s: unterminated frontmatter block starting at line %d', $file, $startLine));
+    }
+    $yamlText = implode("\n", array_slice($lines, $i + 1, $j - $i - 1));
+    [$meta, ] = parseFrontmatter($yamlText);
+    return ['startLine' => $startLine, 'meta' => $meta];
 }
 
 // --- schema validation (mirrors schemas/connector-readme-schema.yaml) ---
@@ -287,9 +264,10 @@ const AUTH_METHODS = [
 ];
 const TOKEN_LIFECYCLES = ['static', 'rotating', 'refreshable', 'none'];
 const OPERATIONS = ['routing', 'matrix', 'geocoding', 'isochrone'];
-const REQUIRED_TOP = [
-    'providerId',
-    'operation',
+// Required at the top level of the single leading frontmatter block.
+const REQUIRED_TOP = ['providerId', 'operations'];
+// Required inside each operation object (the value under operations.<op>).
+const REQUIRED_OP = [
     'auth',
     'endpoint',
     'versioning',
@@ -298,26 +276,18 @@ const REQUIRED_TOP = [
 ];
 
 /**
+ * Validate one operation's metadata — the object under `operations.<op>`.
+ *
  * @param array<string, mixed> $meta
  * @return list<string>
  */
-function validate(array $meta, string $file, int $blockLine): array
+function validateOperation(array $meta, string $file, int $blockLine, string $op): array
 {
     $errors = [];
-    $prefix = $file . ':' . $blockLine;
-    foreach (REQUIRED_TOP as $key) {
+    $prefix = sprintf("%s:%d (operation '%s')", $file, $blockLine, $op);
+    foreach (REQUIRED_OP as $key) {
         if (!array_key_exists($key, $meta) || $meta[$key] === null) {
             $errors[] = sprintf("%s: missing required key '%s'", $prefix, $key);
-        }
-    }
-    if (isset($meta['providerId']) && is_string($meta['providerId'])) {
-        if (preg_match('/^[a-z][a-z0-9-]*$/', $meta['providerId']) !== 1) {
-            $errors[] = sprintf("%s: providerId '%s' must match /^[a-z][a-z0-9-]*$/", $prefix, $meta['providerId']);
-        }
-    }
-    if (isset($meta['operation']) && is_string($meta['operation'])) {
-        if (!in_array($meta['operation'], OPERATIONS, true)) {
-            $errors[] = sprintf("%s: operation '%s' must be one of %s", $prefix, $meta['operation'], implode(', ', OPERATIONS));
         }
     }
     if (isset($meta['auth']) && is_array($meta['auth'])) {
@@ -422,25 +392,43 @@ foreach ($present as $r) {
         continue;
     }
     try {
-        $blocks = extractFrontmatterBlocks($content, $r['path']);
-        if (count($blocks) === 0) {
-            $errors[] = $r['path'] . ': contains no YAML frontmatter blocks';
+        $block = extractLeadingFrontmatter($content, $r['path']);
+        if ($block === null) {
+            $errors[] = $r['path'] . ': contains no YAML frontmatter block';
             continue;
         }
-        $totalBlocks += count($blocks);
-        $seenOps = [];
-        foreach ($blocks as $block) {
-            $errs = validate($block['meta'], $r['path'], $block['startLine']);
-            $errors = array_merge($errors, $errs);
-            if (isset($block['meta']['providerId']) && is_string($block['meta']['providerId']) && $block['meta']['providerId'] !== $r['id']) {
-                $errors[] = sprintf("%s:%d: providerId '%s' does not match directory name '%s'", $r['path'], $block['startLine'], $block['meta']['providerId'], $r['id']);
+        $line = $block['startLine'];
+        $meta = $block['meta'];
+        $prefix = $r['path'] . ':' . $line;
+
+        foreach (REQUIRED_TOP as $key) {
+            if (!array_key_exists($key, $meta) || $meta[$key] === null) {
+                $errors[] = sprintf("%s: missing required key '%s'", $prefix, $key);
             }
-            if (isset($block['meta']['operation']) && is_string($block['meta']['operation'])) {
-                if (in_array($block['meta']['operation'], $seenOps, true)) {
-                    $errors[] = sprintf("%s:%d: duplicate operation '%s' in same file", $r['path'], $block['startLine'], $block['meta']['operation']);
+        }
+        if (isset($meta['providerId']) && is_string($meta['providerId'])) {
+            if (preg_match('/^[a-z][a-z0-9-]*$/', $meta['providerId']) !== 1) {
+                $errors[] = sprintf("%s: providerId '%s' must match /^[a-z][a-z0-9-]*$/", $prefix, $meta['providerId']);
+            }
+            if ($meta['providerId'] !== $r['id']) {
+                $errors[] = sprintf("%s: providerId '%s' does not match directory name '%s'", $prefix, $meta['providerId'], $r['id']);
+            }
+        }
+        if (isset($meta['operations']) && is_array($meta['operations']) && $meta['operations'] !== []) {
+            foreach ($meta['operations'] as $op => $opMeta) {
+                $op = (string) $op;
+                if (!in_array($op, OPERATIONS, true)) {
+                    $errors[] = sprintf("%s: operation '%s' must be one of %s", $prefix, $op, implode(', ', OPERATIONS));
                 }
-                $seenOps[] = $block['meta']['operation'];
+                if (!is_array($opMeta)) {
+                    $errors[] = sprintf("%s: operations.%s must be a mapping", $prefix, $op);
+                    continue;
+                }
+                $totalBlocks++;
+                $errors = array_merge($errors, validateOperation($opMeta, $r['path'], $line, $op));
             }
+        } elseif (array_key_exists('operations', $meta)) {
+            $errors[] = sprintf('%s: operations must be a non-empty mapping of operation → metadata', $prefix);
         }
     } catch (Throwable $e) {
         $errors[] = $r['path'] . ': ' . $e->getMessage();

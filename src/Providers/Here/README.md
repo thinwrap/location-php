@@ -1,6 +1,85 @@
+---
+providerId: here
+operations:
+  routing:
+    auth:
+      method: api-key-query
+      tokenLifecycle: static
+      regionalEndpoints:
+        - https://router.hereapi.com
+        - https://wps.hereapi.com
+    endpoint:
+      default: https://router.hereapi.com/v8/routes
+      regional:
+        - https://router.hereapi.com/v8/routes
+    versioning:
+      vendorApiVersion: v8
+      lastVerified: 2026-05-17
+    selfHostable: false
+    rateLimitDocsUrl: https://www.here.com/pricing
+    retryAfterSurfaced: true
+    notes_passthrough: |
+      HERE uses two endpoints for "routing with optimization" — `findsequence2`
+      for waypoint ordering then standard v8 routing. Forward `transportMode`
+      variants, `return` flags, and `spans` parameters via `_passthrough.query`.
+      Polylines come back flex-polyline encoded; the connector re-encodes to
+      standard precision-5 via `Polyline::decodeFlexPolyline()` + `encodePolyline()`.
+  matrix:
+    auth:
+      method: api-key-query
+      tokenLifecycle: static
+    endpoint:
+      default: https://matrix.router.hereapi.com/v8/matrix
+    versioning:
+      vendorApiVersion: v8
+      lastVerified: 2026-05-17
+    selfHostable: false
+    rateLimitDocsUrl: https://www.here.com/pricing
+    retryAfterSurfaced: true
+    notes_passthrough: |
+      HERE Matrix v8 is always asynchronous. The connector hides a 3-call
+      submit → poll → retrieve cycle behind a single `$matrix->matrix(...)`.
+      Override the wrapper-side polling deadline with
+      `_passthrough.body.timeoutMs` (default 60000ms; not sent to HERE).
+      Polling timeout raises `ConnectorError` with `providerCode:
+      ProviderCode::MatrixPollingTimeout` and `cause: ['matrixId' => ..., 'statusUrl' => ...]`.
+  geocoding:
+    auth:
+      method: api-key-query
+      tokenLifecycle: static
+    endpoint:
+      default: https://geocode.search.hereapi.com/v1/geocode
+    versioning:
+      vendorApiVersion: v1
+      lastVerified: 2026-05-17
+    selfHostable: false
+    rateLimitDocsUrl: https://www.here.com/pricing
+    retryAfterSurfaced: true
+    notes_passthrough: |
+      Three distinct endpoints for forward/reverse/autocomplete. Forward
+      `in=countryCode:USA,CAN`, `at=lat,lng`, `lang=`, `limit=` via
+      `_passthrough.query`.
+  isochrone:
+    auth:
+      method: api-key-query
+      tokenLifecycle: static
+    endpoint:
+      default: https://isoline.router.hereapi.com/v8/isolines
+    versioning:
+      vendorApiVersion: v8
+      lastVerified: 2026-05-17
+    selfHostable: false
+    rateLimitDocsUrl: https://www.here.com/pricing
+    retryAfterSurfaced: true
+    notes_passthrough: |
+      Returns flex-polyline-encoded boundaries which the connector decodes
+      and re-emits as GeoJSON Polygons. Forward `range[type]`, `transportMode`,
+      `routingMode` via `_passthrough.query`.
+---
+
 # HERE Connectors (PHP)
 
-HERE Location Services connectors for routing, distance matrix, geocoding, and isochrone via direct HTTP calls. Each operation has its own YAML frontmatter block below.
+HERE Location Services connectors for routing, distance matrix, geocoding, and isochrone via direct HTTP calls.
 
 ## Quick install
 
@@ -40,33 +119,6 @@ Provision a project at https://platform.here.com/ and create a REST API key. Sen
 
 ## Routing
 
----
-providerId: here
-operation: routing
-auth:
-  method: api-key-query
-  tokenLifecycle: static
-  regionalEndpoints:
-    - https://router.hereapi.com
-    - https://wps.hereapi.com
-endpoint:
-  default: https://router.hereapi.com/v8/routes
-  regional:
-    - https://router.hereapi.com/v8/routes
-versioning:
-  vendorApiVersion: v8
-  lastVerified: 2026-05-17
-selfHostable: false
-rateLimitDocsUrl: https://www.here.com/pricing
-retryAfterSurfaced: true
-notes_passthrough: |
-  HERE uses two endpoints for "routing with optimization" — `findsequence2`
-  for waypoint ordering then standard v8 routing. Forward `transportMode`
-  variants, `return` flags, and `spans` parameters via `_passthrough.query`.
-  Polylines come back flex-polyline encoded; the connector re-encodes to
-  standard precision-5 via `Polyline::decodeFlexPolyline()` + `encodePolyline()`.
----
-
 ### Endpoints
 
 - Standard routing: `GET https://router.hereapi.com/v8/routes`
@@ -92,29 +144,6 @@ On HTTP 429, `ConnectorError->cause['retryAfter']` carries the raw header; parse
 
 ## Matrix
 
----
-providerId: here
-operation: matrix
-auth:
-  method: api-key-query
-  tokenLifecycle: static
-endpoint:
-  default: https://matrix.router.hereapi.com/v8/matrix
-versioning:
-  vendorApiVersion: v8
-  lastVerified: 2026-05-17
-selfHostable: false
-rateLimitDocsUrl: https://www.here.com/pricing
-retryAfterSurfaced: true
-notes_passthrough: |
-  HERE Matrix v8 is always asynchronous. The connector hides a 3-call
-  submit → poll → retrieve cycle behind a single `$matrix->matrix(...)`.
-  Override the wrapper-side polling deadline with
-  `_passthrough.body.timeoutMs` (default 60000ms; not sent to HERE).
-  Polling timeout raises `ConnectorError` with `providerCode:
-  ProviderCode::MatrixPollingTimeout` and `cause: ['matrixId' => ..., 'statusUrl' => ...]`.
----
-
 ### Endpoint
 
 `POST https://matrix.router.hereapi.com/v8/matrix?async=true` → poll status → retrieve.
@@ -125,26 +154,6 @@ notes_passthrough: |
 
 ## Geocoding
 
----
-providerId: here
-operation: geocoding
-auth:
-  method: api-key-query
-  tokenLifecycle: static
-endpoint:
-  default: https://geocode.search.hereapi.com/v1/geocode
-versioning:
-  vendorApiVersion: v1
-  lastVerified: 2026-05-17
-selfHostable: false
-rateLimitDocsUrl: https://www.here.com/pricing
-retryAfterSurfaced: true
-notes_passthrough: |
-  Three distinct endpoints for forward/reverse/autocomplete. Forward
-  `in=countryCode:USA,CAN`, `at=lat,lng`, `lang=`, `limit=` via
-  `_passthrough.query`.
----
-
 ### Endpoints
 
 - Forward: `GET https://geocode.search.hereapi.com/v1/geocode`
@@ -152,26 +161,6 @@ notes_passthrough: |
 - Autocomplete: `GET https://autosuggest.search.hereapi.com/v1/autosuggest`
 
 ## Isochrone
-
----
-providerId: here
-operation: isochrone
-auth:
-  method: api-key-query
-  tokenLifecycle: static
-endpoint:
-  default: https://isoline.router.hereapi.com/v8/isolines
-versioning:
-  vendorApiVersion: v8
-  lastVerified: 2026-05-17
-selfHostable: false
-rateLimitDocsUrl: https://www.here.com/pricing
-retryAfterSurfaced: true
-notes_passthrough: |
-  Returns flex-polyline-encoded boundaries which the connector decodes
-  and re-emits as GeoJSON Polygons. Forward `range[type]`, `transportMode`,
-  `routingMode` via `_passthrough.query`.
----
 
 ### Endpoint
 

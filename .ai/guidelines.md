@@ -41,7 +41,7 @@ as your template (it implements routing + matrix + geocoding). Namespace is
 1. **Register the id** — add the case to [`src/Enum/LocationProviderId.php`](../src/Enum/LocationProviderId.php).
 2. **Config** — `src/Config/<Provider>Config.php` (`final readonly class`).
 3. **Connectors** — `src/Connector/<Provider>/<Provider><Operation>Connector.php`, one per supported operation (`Routing`/`Matrix`/`Geocoding`/`Isochrone`); `extends BaseConnector`, implements the operation interface from [`src/Contract/`](../src/Contract), private `mapVendorError(...)`.
-4. **README + narrowed types** — `src/Providers/<Provider>/README.md` (one YAML frontmatter block per operation; schema: [`../schemas/connector-readme-schema.yaml`](../schemas/connector-readme-schema.yaml)) + optional `DTO/` / `Enum/` for narrowed input. **This** is the connector's consumer doc.
+4. **README + narrowed types** — `src/Providers/<Provider>/README.md` (a single top-of-file YAML frontmatter block, opening `---` on line 1, with each operation keyed under `operations:`; schema: [`../schemas/connector-readme-schema.yaml`](../schemas/connector-readme-schema.yaml)) + optional `DTO/` / `Enum/` for narrowed input. Keep the block at the very top or GitHub leaks the raw YAML into the page. **This** is the connector's consumer doc.
 5. **Dispatch** — add the `match` arm to each relevant facade (`src/Routing.php`, `src/Matrix.php`, `src/Geocoding.php`, `src/Isochrone.php`).
 6. **Test** — `tests/Unit/Connector/<Provider>/<Provider><Operation>ConnectorTest.php`; PHPUnit with `#[Test]`, mock the PSR-18 client.
 
