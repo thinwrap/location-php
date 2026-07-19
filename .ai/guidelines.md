@@ -12,7 +12,7 @@ usage documentation.
 
 - **guidelines.md** (this file) — entry point + the "add a connector" recipe.
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) — the facade → dispatch → base model and the location-distinctive + PHP/PSR invariants every change must hold.
-- [`CONVENTIONS.md`](./CONVENTIONS.md) — naming, file/namespace layout, error mapping, `_passthrough`, per-connector README frontmatter.
+- [`CONVENTIONS.md`](./CONVENTIONS.md) — naming, file/namespace layout, error mapping, `_passthrough`, the per-connector README convention.
 
 ## The shape in one sentence
 
@@ -41,7 +41,7 @@ as your template (it implements routing + matrix + geocoding). Namespace is
 1. **Register the id** — add the case to [`src/Enum/LocationProviderId.php`](../src/Enum/LocationProviderId.php).
 2. **Config** — `src/Config/<Provider>Config.php` (`final readonly class`).
 3. **Connectors** — `src/Connector/<Provider>/<Provider><Operation>Connector.php`, one per supported operation (`Routing`/`Matrix`/`Geocoding`/`Isochrone`); `extends BaseConnector`, implements the operation interface from [`src/Contract/`](../src/Contract), private `mapVendorError(...)`.
-4. **README + narrowed types** — `src/Providers/<Provider>/README.md` (a single top-of-file YAML frontmatter block, opening `---` on line 1, with each operation keyed under `operations:`; schema: [`../schemas/connector-readme-schema.yaml`](../schemas/connector-readme-schema.yaml)) + optional `DTO/` / `Enum/` for narrowed input. Keep the block at the very top or GitHub leaks the raw YAML into the page. **This** is the connector's consumer doc.
+4. **README + narrowed types** — `src/Providers/<Provider>/README.md` (plain Markdown that opens directly with its `# Title` — no YAML metadata block) + optional `DTO/` / `Enum/` for narrowed input. **This** is the connector's consumer doc; keep it complete and at parity with the sibling-language libraries.
 5. **Dispatch** — add the `match` arm to each relevant facade (`src/Routing.php`, `src/Matrix.php`, `src/Geocoding.php`, `src/Isochrone.php`).
 6. **Test** — `tests/Unit/Connector/<Provider>/<Provider><Operation>ConnectorTest.php`; PHPUnit with `#[Test]`, mock the PSR-18 client.
 
@@ -51,7 +51,6 @@ as your template (it implements routing + matrix + geocoding). Namespace is
 composer test                 # PHPUnit; ≥80% line-coverage gate
 composer phpstan              # PHPStan level 8, zero errors
 composer cs                   # PHP-CS-Fixer (PER-CS); composer cs-fix to apply
-composer validate-frontmatter # validates every connector README against the schema
 ```
 
 CI runs these on PHP 8.2 / 8.3 / 8.4, plus an offline import smoke (zero construct-time egress),

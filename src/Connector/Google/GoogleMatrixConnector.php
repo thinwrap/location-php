@@ -128,6 +128,13 @@ final class GoogleMatrixConnector extends BaseConnector implements MatrixConnect
      */
     private function mapVendorError(int $httpStatus, mixed $body): ProviderCode
     {
+        // Prefer the structured google.rpc.ErrorInfo reason over the HTTP status:
+        // Google returns 400 INVALID_ARGUMENT for an invalid key.
+        $reasonCode = $this->reasonProviderCode($body);
+        if ($reasonCode !== null) {
+            return $reasonCode;
+        }
+
         $googleStatus = null;
         if (is_array($body) && isset($body['error']) && is_array($body['error'])) {
             $error = $body['error'];
@@ -157,6 +164,57 @@ final class GoogleMatrixConnector extends BaseConnector implements MatrixConnect
         }
 
         return ProviderCode::Unknown;
+    }
+
+    /**
+     * Map a google.rpc.ErrorInfo `reason` (from `error.details[]`) to a
+     * ProviderCode, or null to fall back to the HTTP-status mapping. This lets a
+     * bad/blocked key surface as auth_failed even though Google reports it as
+     * HTTP 400 INVALID_ARGUMENT.
+     *
+     * @param mixed $body Decoded vendor error body.
+     */
+    private function reasonProviderCode(mixed $body): ?ProviderCode
+    {
+        if (!is_array($body) || !isset($body['error']) || !is_array($body['error'])) {
+            return null;
+        }
+        $details = $body['error']['details'] ?? null;
+        if (!is_array($details)) {
+            return null;
+        }
+        $reason = null;
+        foreach ($details as $d) {
+            if (!is_array($d)) {
+                continue;
+            }
+            $type = $d['@type'] ?? null;
+            $isErrorInfo = (($d['domain'] ?? null) === 'googleapis.com')
+                || (is_string($type) && str_ends_with($type, 'google.rpc.ErrorInfo'));
+            if ($isErrorInfo && isset($d['reason']) && is_string($d['reason']) && $d['reason'] !== '') {
+                $reason = $d['reason'];
+                break;
+            }
+        }
+        if ($reason === null) {
+            return null;
+        }
+
+        $authReasons = [
+            'API_KEY_INVALID', 'API_KEY_SERVICE_BLOCKED', 'API_KEY_HTTP_REFERRER_BLOCKED',
+            'API_KEY_IP_ADDRESS_BLOCKED', 'API_KEY_ANDROID_APP_BLOCKED', 'API_KEY_IOS_APP_BLOCKED',
+            'CREDENTIALS_MISSING', 'ACCESS_TOKEN_EXPIRED', 'ACCESS_TOKEN_SCOPE_INSUFFICIENT',
+            'ACCESS_TOKEN_TYPE_UNSUPPORTED', 'ACCOUNT_STATE_INVALID', 'CONSUMER_INVALID',
+            'CONSUMER_SUSPENDED', 'USER_PROJECT_DENIED', 'SERVICE_DISABLED', 'BILLING_DISABLED',
+        ];
+        if (in_array($reason, $authReasons, true)) {
+            return ProviderCode::AuthFailed;
+        }
+        if ($reason === 'RATE_LIMIT_EXCEEDED' || $reason === 'RESOURCE_QUOTA_EXCEEDED') {
+            return ProviderCode::RateLimited;
+        }
+
+        return null;
     }
 
     /**

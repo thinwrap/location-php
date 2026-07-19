@@ -1,15 +1,10 @@
 # `thinwrap/location` (PHP) — Conventions
 
 Naming, file layout, and test patterns for AI agents adding or refactoring a connector.
-The frontmatter is a **single block at the very top of the file** (opening `---` on
-line 1), with every operation keyed under `operations:`; the `# Title` follows the
-closing `---`. GitHub only renders a `---…---` block as (hidden) frontmatter when it
-leads the file — a block placed lower leaks its raw YAML into the page body. The
-validator scans to the first `---`, so it will **not** catch a misplaced block; keep
-it on top.
 
-The per-connector README frontmatter schema authoritative source is
-[`../schemas/connector-readme-schema.yaml`](../schemas/connector-readme-schema.yaml).
+Each provider's per-connector `README.md` is plain Markdown — it opens directly with its
+`# Title` (no YAML metadata block). It is the connector's consumer-facing doc; keep it
+complete and at parity with the sibling-language libraries.
 
 ## Where files live in this repo
 
@@ -41,7 +36,7 @@ src/
     TravelMode.php                            # 'driving'|'walking'|'cycling'
     IsochroneType.php                         # 'time'|'distance'
   Providers/<Provider>/
-    README.md                                 # top-of-file YAML frontmatter (operations map) + body
+    README.md                                 # per-connector consumer doc (plain Markdown)
     DTO/                                      # optional per-provider narrowed input types
     Enum/                                     # optional per-provider enums
   Util/
@@ -54,16 +49,14 @@ tests/
   Unit/DTO/                                   # DTO normalization specs
   Unit/Util/                                  # Polyline + Coordinate specs
   Static/                                     # PHPStan-only narrowing fixtures
-schemas/
-  connector-readme-schema.yaml                # per-connector README frontmatter schema
 scripts/
-  validate-frontmatter.php                    # no-deps validator, CI-wired
+  # build/packaging + lint helpers
 .ai/
   guidelines.md                               # contributor entry point + add-a-connector recipe
   ARCHITECTURE.md                             # 6 location-distinctive invariants + PHP rules
   CONVENTIONS.md                              # this file
 .github/workflows/
-  ci.yml                                      # PHP 8.2/8.3/8.4 matrix + tests + lint + frontmatter
+  ci.yml                                      # PHP 8.2/8.3/8.4 matrix + tests + lint
   publish.yml                                 # publish to Packagist
 ```
 
@@ -94,7 +87,7 @@ enum LocationProviderId: string
 | `src/Config/<Provider>Config.php` | yes | Exported `<Provider>Config` DTO (shared across ops) |
 | `src/Providers/<Provider>/DTO/<Provider><Op>Options.php` | optional | Per-provider narrowed input type (for augmentations beyond baseline) |
 | `src/Providers/<Provider>/Enum/<Provider><Concept>.php` | optional | Per-provider narrowed enum (e.g. `HereTransportMode`) |
-| `src/Providers/<Provider>/README.md` | yes | Top-of-file YAML frontmatter (operations map) + body |
+| `src/Providers/<Provider>/README.md` | yes | Per-connector consumer doc (plain Markdown) |
 
 ## `mapVendorError(int $status, mixed $body): ProviderCode` pattern
 
@@ -243,6 +236,4 @@ Future augmentations add per-provider narrowed types via `src/Providers/<Provide
 - PHPStan level 8 — zero errors. Run: `composer phpstan`.
 - PER-CS via PHP-CS-Fixer. Run: `composer cs` (check) or `composer cs-fix`.
 - PHPUnit 11 with `#[Test]` attributes. Run: `composer test`.
-- `composer validate-frontmatter` validates every `src/Providers/<Provider>/README.md`
-  against `schemas/connector-readme-schema.yaml`.
 - No build step (no transpilation). Composer auto-loads via PSR-4 from `src/`.

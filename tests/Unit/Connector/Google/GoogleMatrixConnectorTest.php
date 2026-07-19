@@ -322,6 +322,16 @@ final class GoogleMatrixConnectorTest extends TestCase
         ];
         yield '429 → RateLimited' => [429, ['error' => ['message' => 'slow down']], ProviderCode::RateLimited];
         yield '400 → InvalidRequest' => [400, ['error' => ['message' => 'bad arg']], ProviderCode::InvalidRequest];
+        yield '400 + ErrorInfo API_KEY_INVALID → AuthFailed' => [
+            400,
+            ['error' => ['status' => 'INVALID_ARGUMENT', 'details' => [['@type' => 'type.googleapis.com/google.rpc.ErrorInfo', 'reason' => 'API_KEY_INVALID', 'domain' => 'googleapis.com']]]],
+            ProviderCode::AuthFailed,
+        ];
+        yield '400 + ErrorInfo RATE_LIMIT_EXCEEDED → RateLimited' => [
+            400,
+            ['error' => ['details' => [['reason' => 'RATE_LIMIT_EXCEEDED', 'domain' => 'googleapis.com']]]],
+            ProviderCode::RateLimited,
+        ];
         yield '500 → ProviderUnavailable' => [500, null, ProviderCode::ProviderUnavailable];
         yield '503 → ProviderUnavailable' => [503, null, ProviderCode::ProviderUnavailable];
         yield '418 → Unknown' => [418, null, ProviderCode::Unknown];

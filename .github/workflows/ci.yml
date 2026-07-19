@@ -83,10 +83,10 @@ jobs:
           if-no-files-found: warn
 
   # --- Lint gates ---
-  # Frontmatter validation + no-vendor-SDK check + MIT license.
+  # No-vendor-SDK check + MIT license.
   # Runs once on the lowest-supported PHP (8.2) — these gates are PHP-version-independent.
   lint-gates:
-    name: lint gates (frontmatter · license · no-sdk)
+    name: lint gates (license · no-sdk)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -100,9 +100,6 @@ jobs:
 
       - name: Install dependencies
         run: composer install --no-interaction --no-progress --prefer-dist
-
-      - name: Validate per-connector README frontmatter
-        run: php scripts/validate-frontmatter.php --expected-blocks 21 --expected-providers 6
 
       - name: Verify MIT license
         run: |

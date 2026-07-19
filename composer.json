@@ -28,7 +28,7 @@
         "psr-18",
         "thinwrap"
     ],
-    "homepage": "https://github.com/thinwrap/location-php",
+    "homepage": "https://thinwrap.dev",
     "support": {
         "issues": "https://github.com/thinwrap/location-php/issues",
         "source": "https://github.com/thinwrap/location-php"
@@ -66,8 +66,7 @@
         "test": "phpunit",
         "phpstan": "phpstan analyse",
         "cs": "php-cs-fixer fix --dry-run --diff",
-        "cs-fix": "php-cs-fixer fix",
-        "validate-frontmatter": "php scripts/validate-frontmatter.php"
+        "cs-fix": "php-cs-fixer fix"
     },
     "config": {
         "sort-packages": true,
