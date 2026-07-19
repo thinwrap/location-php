@@ -10,3 +10,6 @@ composer.phar
 .idea/
 .vscode/
 *.swp
+
+# macOS
+.DS_Store
