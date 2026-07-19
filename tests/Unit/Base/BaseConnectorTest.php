@@ -97,6 +97,45 @@ final class BaseConnectorTest extends TestCase
     }
 
     #[Test]
+    public function dispatchDoesNotLeakCredentialThroughExceptionChain(): void
+    {
+        // Regression (CWE-532): the raw PSR-18 exception embeds the full request
+        // URL — including the live `key=` credential — in its message. It must
+        // NOT be chained as previous/cause, or `(string) $e`, getPrevious(), and
+        // log-framework serialization would re-expose the redacted secret.
+        $secret = 'SUPERSECRETKEY123';
+        $client = new class implements ClientInterface {
+            public function sendRequest(RequestInterface $request): ResponseInterface
+            {
+                throw new class ('cURL error 6: Could not resolve host for https://maps.example/geocode?address=X&key=SUPERSECRETKEY123') extends \RuntimeException implements ClientExceptionInterface {};
+            }
+        };
+        $factory = new HttpFactory();
+        $connector = new GoogleGeocodingConnector(new GoogleConfig(apiKey: $secret), $client, $factory, $factory);
+
+        try {
+            $connector->geocode(new GeocodeOptions(address: 'X'));
+            self::fail('expected ConnectorError');
+        } catch (ConnectorError $e) {
+            self::assertSame(ProviderCode::ProviderUnavailable, $e->providerCode);
+
+            // No raw Throwable is chained into the exception's `previous` slot.
+            self::assertNull($e->getPrevious());
+
+            // The secret must not surface anywhere reachable from the error:
+            // the message, the full string-cast, or the public `cause` payload.
+            self::assertStringNotContainsString($secret, $e->getMessage());
+            self::assertStringNotContainsString($secret, (string) $e);
+            self::assertStringNotContainsString($secret, var_export($e->cause, true));
+
+            // A non-sensitive descriptor (the transport exception class) is kept
+            // in `cause` in place of the raw Throwable.
+            self::assertIsArray($e->cause);
+            self::assertArrayHasKey('raw', $e->cause);
+        }
+    }
+
+    #[Test]
     public function sendPostJsonRejectsUnencodableBody(): void
     {
         // A never-called client: the JSON encode failure happens before dispatch.

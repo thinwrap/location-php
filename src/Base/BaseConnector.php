@@ -131,12 +131,20 @@ abstract class BaseConnector
         try {
             return $this->httpClient->sendRequest($request);
         } catch (ClientExceptionInterface $exception) {
+            // The raw PSR-18 client exception (e.g. Guzzle) embeds the full
+            // request URL in its message, which for query-key providers IS the
+            // credential (`?key=…`/`token=…`/`access_token=…`). Chaining that raw
+            // Throwable as `cause`/`previous` would re-expose the secret via
+            // `(string) $error`, `getPrevious()`, `error_log($error)`, or Monolog
+            // `['exception' => $error]` — defeating the `providerMessage`
+            // redaction (CWE-532). Surface only the redacted message plus a
+            // non-sensitive descriptor (the transport exception class); never the
+            // raw message/URL and never the Throwable itself.
             throw new ConnectorError(
                 statusCode: null,
                 providerCode: ProviderCode::ProviderUnavailable,
                 providerMessage: $this->redactCredentials($exception->getMessage()),
-                cause: $exception,
-                previous: $exception,
+                cause: ['raw' => ['exception' => $exception::class], 'retryAfter' => null],
             );
         }
     }
@@ -148,7 +156,8 @@ abstract class BaseConnector
      * its exception message, which can leak live credentials passed as query
      * params. Only the credential value is masked — the rest of the message
      * (e.g. "cURL error 6: Could not resolve host …") is preserved. The raw
-     * exception in `cause`/`previous` is left untouched.
+     * exception itself is never attached to the ConnectorError (see dispatch()),
+     * so the URL cannot re-surface through the exception chain.
      */
     private function redactCredentials(string $message): string
     {

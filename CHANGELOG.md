@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-07-20
+
 ### Changed
 
 - **Google routing & matrix** now classify an invalid or restricted API key as
@@ -21,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   links it held now live in the README prose; the frontmatter validator
   (`scripts/validate-frontmatter.php`), its schema, and the CI gate that ran it
   have been removed.
+
+### Security
+
+- **API keys no longer leak through the exception chain.** On a transport
+  failure `dispatch()` redacted the request URL from the error message but still
+  attached the raw PSR-18 exception — whose message embeds the full URL,
+  including `?key=…` / `token=` — as both `cause` and `previous`, so
+  `(string) $error`, `$error->getPrevious()`, `error_log()`, and Monolog's
+  `['exception' => $e]` re-exposed the credential (CWE-532). The raw exception is
+  no longer chained; only a non-sensitive class descriptor is attached.
 
 ## [1.0.0] — 2026-06-04
 
