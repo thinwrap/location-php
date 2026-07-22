@@ -124,7 +124,7 @@ final class TomTomMatrixConnectorTest extends TestCase
 
         $submitJson = (string) json_encode(['jobId' => 'job-abc']);
         $pendingJson = (string) json_encode(['state' => 'Running']);
-        $succeededJson = (string) json_encode(['state' => 'Succeeded']);
+        $succeededJson = (string) json_encode(['state' => 'Completed']);
         $resultJson = (string) json_encode([
             'data' => [
                 [
@@ -260,7 +260,7 @@ final class TomTomMatrixConnectorTest extends TestCase
 
         $client = self::sequencedClient([
             new Response(200, [], (string) json_encode(['jobId' => 'job-strip'])),
-            new Response(200, [], (string) json_encode(['state' => 'Succeeded'])),
+            new Response(200, [], (string) json_encode(['state' => 'Completed'])),
             new Response(200, [], (string) json_encode(['data' => []])),
         ]);
         $connector = self::makeConnector($client, static function (int $_us): void {});

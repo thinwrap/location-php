@@ -196,7 +196,7 @@ final class HereGeocodingConnector extends BaseConnector implements GeocodingCon
             // reject non-finite location before it reaches the query string.
             $options->location->assertFinite('HERE autocomplete location');
             if ($options->radius !== null) {
-                $query['in'] = 'circle:' . $options->location->lat . ',' . $options->location->lng . ';r=' . $options->radius;
+                $query['in'] = 'circle:' . $options->location->toLatLngString() . ';r=' . $options->radius;
             } else {
                 $query['at'] = $options->location->toLatLngString();
             }

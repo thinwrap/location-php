@@ -19,6 +19,7 @@ use Thinwrap\Location\DTO\LatLng;
 use Thinwrap\Location\DTO\Matrix\MatrixOptions;
 use Thinwrap\Location\DTO\Passthrough;
 use Thinwrap\Location\Enum\ProviderCode;
+use Thinwrap\Location\Enum\TravelMode;
 
 final class EsriMatrixConnectorTest extends TestCase
 {
@@ -31,16 +32,70 @@ final class EsriMatrixConnectorTest extends TestCase
     }
 
     #[Test]
-    public function matrixReturnsNormalizedCellsWithMileAndMinuteConversion(): void
+    public function matrixReturnsNormalizedCellsFromSparseMatrix(): void
     {
-        // 2 origins × 2 destinations; fixture.
+        // Real esriNAODOutputSparseMatrix shape (World OD Cost Matrix, verified
+        // live 2026-07-20): odCostMatrix maps 1-based origin OID → { destOID:
+        // [values in costAttributeNames order] }. TravelTime is minutes,
+        // Kilometers is km. 2 origins × 1 destination.
+        $json = (string) json_encode([
+            'requestID' => 'req-1',
+            'odCostMatrix' => [
+                'costAttributeNames' => ['TravelTime', 'Kilometers'],
+                '1' => ['1' => [93.25787017375364, 98.94833503121721]],
+                '2' => ['1' => [81.54786997057796, 99.08865887338234]],
+            ],
+            'messages' => [],
+        ]);
+
+        $connector = self::makeConnector(self::respondingClient(new Response(
+            200,
+            ['Content-Type' => 'application/json'],
+            $json,
+        )));
+
+        $result = $connector->matrix(new MatrixOptions(
+            origins: [new LatLng(40.7484, -73.9857), new LatLng(40.758, -73.9855)],
+            destinations: [new LatLng(41.1792, -73.1952)],
+        ));
+
+        self::assertCount(2, $result->cells);
+
+        // OIDs are 1-based on the wire → decrement to 0-based.
+        self::assertSame(0, $result->cells[0]->originIndex);
+        self::assertSame(0, $result->cells[0]->destinationIndex);
+        // TravelTime 93.25787 min × 60 = 5595.472 s.
+        self::assertEqualsWithDelta(93.25787017375364 * 60, $result->cells[0]->durationSeconds, 1e-6);
+        // Kilometers 98.94834 km × 1000 = 98948.335 m.
+        self::assertEqualsWithDelta(98.94833503121721 * 1000, $result->cells[0]->distanceMeters, 1e-6);
+
+        // Second origin → same destination.
+        self::assertSame(1, $result->cells[1]->originIndex);
+        self::assertSame(0, $result->cells[1]->destinationIndex);
+        self::assertEqualsWithDelta(81.54786997057796 * 60, $result->cells[1]->durationSeconds, 1e-6);
+        self::assertEqualsWithDelta(99.08865887338234 * 1000, $result->cells[1]->distanceMeters, 1e-6);
+
+        self::assertIsArray($result->raw);
+    }
+
+    #[Test]
+    public function matrixReturnsNormalizedCellsFromOdLinesFallback(): void
+    {
+        // Real esriNAODOutputStraightLines fallback shape: odLines.features[]
+        // with 1-based OriginID/DestinationID + Total_TravelTime (minutes) /
+        // Total_Kilometers (km).
         $json = (string) json_encode([
             'odLines' => [
                 'features' => [
-                    ['attributes' => ['OriginOID' => 1, 'DestinationOID' => 1, 'Total_Time' => 5,  'Total_Distance' => 2]],
-                    ['attributes' => ['OriginOID' => 1, 'DestinationOID' => 2, 'Total_Time' => 10, 'Total_Distance' => 5]],
-                    ['attributes' => ['OriginOID' => 2, 'DestinationOID' => 1, 'Total_Time' => 8,  'Total_Distance' => 4]],
-                    ['attributes' => ['OriginOID' => 2, 'DestinationOID' => 2, 'Total_Time' => 3,  'Total_Distance' => 1]],
+                    ['attributes' => [
+                        'ObjectID' => 1,
+                        'OriginID' => 1,
+                        'DestinationID' => 1,
+                        'DestinationRank' => 1,
+                        'Total_TravelTime' => 93.25787017375364,
+                        'Total_Kilometers' => 98.94833503121721,
+                        'Shape_Length' => 0.90,
+                    ]],
                 ],
             ],
         ]);
@@ -52,26 +107,15 @@ final class EsriMatrixConnectorTest extends TestCase
         )));
 
         $result = $connector->matrix(new MatrixOptions(
-            origins: [new LatLng(40.7128, -74.006), new LatLng(40.758, -73.9855)],
-            destinations: [new LatLng(40.7484, -73.9856), new LatLng(40.7614, -73.9776)],
+            origins: [new LatLng(40.7484, -73.9857)],
+            destinations: [new LatLng(41.1792, -73.1952)],
         ));
 
-        self::assertCount(4, $result->cells);
-
-        // OIDs are 1-based on the wire → decrement to 0-based.
+        self::assertCount(1, $result->cells);
         self::assertSame(0, $result->cells[0]->originIndex);
         self::assertSame(0, $result->cells[0]->destinationIndex);
-        // 5 min × 60 = 300s.
-        self::assertSame(300.0, $result->cells[0]->durationSeconds);
-        // 2 miles × 1609.344 = 3218.688 m.
-        self::assertEqualsWithDelta(3218.688, $result->cells[0]->distanceMeters, 0.001);
-
-        // (1, 1) — fourth cell.
-        self::assertSame(1, $result->cells[3]->originIndex);
-        self::assertSame(1, $result->cells[3]->destinationIndex);
-        self::assertSame(180.0, $result->cells[3]->durationSeconds);
-        self::assertEqualsWithDelta(1609.344, $result->cells[3]->distanceMeters, 0.001);
-
+        self::assertEqualsWithDelta(93.25787017375364 * 60, $result->cells[0]->durationSeconds, 1e-6);
+        self::assertEqualsWithDelta(98.94833503121721 * 1000, $result->cells[0]->distanceMeters, 1e-6);
         self::assertIsArray($result->raw);
     }
 
@@ -99,7 +143,9 @@ final class EsriMatrixConnectorTest extends TestCase
 
         self::assertSame('esri-test-token', $form['token']);
         self::assertSame('json', $form['f']);
-        self::assertSame('esriNAODOutputStraightLine', $form['outputType']);
+        self::assertSame('esriNAODOutputSparseMatrix', $form['outputType']);
+        self::assertSame('TravelTime', $form['impedanceAttributeName']);
+        self::assertSame('Kilometers', $form['accumulateAttributeNames']);
 
         // Pipe-joined `lng,lat,id` triplets, 1-based.
         self::assertSame('-74.006,40.7128,1;-73.9855,40.758,2', $form['origins']);
@@ -163,6 +209,79 @@ final class EsriMatrixConnectorTest extends TestCase
         self::assertSame('extraValue', $form['extraParam']);
         self::assertSame('custom', $recorder->captured->getHeaderLine('X-Custom'));
         self::assertStringContainsString('returnExtra=true', (string) $recorder->captured->getUri());
+    }
+
+    #[Test]
+    public function matrixDecodesWalkTimeImpedanceColumnForWalking(): void
+    {
+        // With a WALK travel mode, ArcGIS overrides the requested impedance, so
+        // costAttributeNames comes back as ['WalkTime', 'Kilometers'] — NOT
+        // 'TravelTime'. The pre-fix decoder looked up 'TravelTime' only and
+        // silently reported every duration as 0. Live values from
+        // route-api.arcgis.com (2026-07-21).
+        $walkMin = 13.094903051108146;
+        $walkKm = 1.091226960340165;
+        $json = (string) json_encode([
+            'odCostMatrix' => [
+                'costAttributeNames' => ['WalkTime', 'Kilometers'],
+                '1' => ['1' => [$walkMin, $walkKm]],
+            ],
+        ]);
+
+        $connector = self::makeConnector(self::respondingClient(new Response(
+            200,
+            ['Content-Type' => 'application/json'],
+            $json,
+        )));
+
+        $result = $connector->matrix(new MatrixOptions(
+            origins: [new LatLng(0, 0)],
+            destinations: [new LatLng(1, 1)],
+            travelMode: TravelMode::Walking,
+        ));
+
+        self::assertCount(1, $result->cells);
+        self::assertEqualsWithDelta($walkMin * 60, $result->cells[0]->durationSeconds, 1e-6);
+        self::assertEqualsWithDelta($walkKm * 1000, $result->cells[0]->distanceMeters, 1e-6);
+    }
+
+    #[Test]
+    public function matrixSendsFullWalkingTravelModeObject(): void
+    {
+        $recorder = self::recordingClient(self::okMatrixResponse());
+        $connector = self::makeConnector($recorder);
+
+        $connector->matrix(new MatrixOptions(
+            origins: [new LatLng(0, 0)],
+            destinations: [new LatLng(1, 1)],
+            travelMode: TravelMode::Walking,
+        ));
+
+        self::assertNotNull($recorder->captured);
+        $form = [];
+        parse_str((string) $recorder->captured->getBody(), $form);
+        self::assertIsString($form['travelMode'] ?? null);
+        /** @var array<string,mixed> $travelMode */
+        $travelMode = json_decode((string) $form['travelMode'], true, 512, JSON_THROW_ON_ERROR);
+        self::assertSame('WALK', $travelMode['type']);
+        self::assertSame('WalkTime', $travelMode['impedanceAttributeName']);
+    }
+
+    #[Test]
+    public function matrixRejectsCyclingWithUnsupportedTravelMode(): void
+    {
+        $connector = self::makeConnector(self::respondingClient(new Response(200, [], '{}')));
+
+        try {
+            $connector->matrix(new MatrixOptions(
+                origins: [new LatLng(0, 0)],
+                destinations: [new LatLng(1, 1)],
+                travelMode: TravelMode::Cycling,
+            ));
+            self::fail('Expected ConnectorError.');
+        } catch (ConnectorError $e) {
+            self::assertSame(ProviderCode::UnsupportedTravelMode, $e->providerCode);
+        }
     }
 
     #[Test]
@@ -299,10 +418,9 @@ final class EsriMatrixConnectorTest extends TestCase
             200,
             ['Content-Type' => 'application/json'],
             (string) json_encode([
-                'odLines' => [
-                    'features' => [
-                        ['attributes' => ['OriginOID' => 1, 'DestinationOID' => 1, 'Total_Time' => 1, 'Total_Distance' => 1]],
-                    ],
+                'odCostMatrix' => [
+                    'costAttributeNames' => ['TravelTime', 'Kilometers'],
+                    '1' => ['1' => [1.0, 1.0]],
                 ],
             ]),
         );

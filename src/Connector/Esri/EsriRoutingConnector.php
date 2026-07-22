@@ -18,7 +18,6 @@ use Thinwrap\Location\DTO\Routing\RoutingOptions;
 use Thinwrap\Location\DTO\Routing\RoutingResult;
 use Thinwrap\Location\Enum\LocationProviderId;
 use Thinwrap\Location\Enum\ProviderCode;
-use Thinwrap\Location\Enum\TravelMode;
 use Thinwrap\Location\Util\Passthrough;
 use Thinwrap\Location\Util\Polyline;
 
@@ -69,6 +68,15 @@ final class EsriRoutingConnector extends BaseConnector implements RoutingConnect
             );
         }
 
+        // reject non-finite waypoint coordinates before they reach the inline
+        // json_encode() below — that encode runs OUTSIDE sendPostForm's error
+        // handling and, with JSON_THROW_ON_ERROR, a NaN/INF coordinate would
+        // raise a raw \JsonException instead of the unified ConnectorError.
+        // Mirrors the isochrone connectors' center-finiteness pre-flight.
+        foreach ($waypoints as $wp) {
+            $wp->assertFinite('Esri route');
+        }
+
         $stops = $this->buildStopsFeatureSet($waypoints);
 
         $form = [
@@ -83,8 +91,22 @@ final class EsriRoutingConnector extends BaseConnector implements RoutingConnect
             'outSR' => '4326',
         ];
 
+        // ESRI findBestSequence optimizes an OPEN route (optionally preserving the
+        // first/last stop); it has no closed round-trip mode.
+        if ($options->isRoundTrip) {
+            throw new ConnectorError(
+                statusCode: null,
+                providerCode: ProviderCode::UnsupportedOption,
+                providerMessage: 'ESRI findBestSequence optimizes an open route and cannot return a closed round trip; remove isRoundTrip or use a provider that supports it (e.g. Mapbox/OSRM).',
+            );
+        }
+
         if ($options->optimize) {
             $form['findBestSequence'] = 'true';
+            // Needed to recover the optimized visiting order: the `stops`
+            // FeatureSet carries each stop's 1-based `Sequence` (there is no
+            // `Stops` route attribute).
+            $form['returnStops'] = 'true';
             if ($options->optimizeFixedOrigin) {
                 $form['preserveFirstStop'] = 'true';
             }
@@ -93,7 +115,7 @@ final class EsriRoutingConnector extends BaseConnector implements RoutingConnect
             }
         }
 
-        $travelMode = $this->mapTravelMode($options->travelMode);
+        $travelMode = EsriTravelModes::map($options->travelMode, 'Routing');
         if ($travelMode !== null) {
             $form['travelMode'] = $travelMode;
         }
@@ -212,21 +234,34 @@ final class EsriRoutingConnector extends BaseConnector implements RoutingConnect
 
         $attrs = (isset($feature['attributes']) && is_array($feature['attributes'])) ? $feature['attributes'] : [];
 
-        // `Total_Length` is in meters because the request pins
-        // `directionsLengthUnits=esriNAUMeters` (see route() form), which governs
-        // the route summary's linear unit for the World Route service. Verified
-        // against the ESRI World Route service unit contract and kept identical
-        // to the TS sibling (esri.routing.connector.ts). Fall back to
-        // `Total_Kilometers * 1000` for older brownfield responses that omit it.
-        $totalLength = $attrs['Total_Length'] ?? null;
-        if ($totalLength === null) {
-            $totalKm = $attrs['Total_Kilometers'] ?? null;
-            $totalDistanceMeters = $totalKm !== null ? self::toFloat($totalKm) * 1000.0 : 0.0;
+        // Totals come from the directions summary, which is travel-mode-independent
+        // (`totalLength` in meters via directionsLengthUnits=esriNAUMeters,
+        // `totalTime` in minutes). The route feature's `Total_*` attributes are
+        // named after the active impedance — driving reports `Total_TravelTime`,
+        // walking reports `Total_WalkTime`, and neither `Total_Length` nor
+        // `Total_Time` is emitted at all — so reading them directly silently
+        // yields 0 for any non-driving mode. Fall back to the attributes only when
+        // the summary is absent (verified live against route-api.arcgis.com,
+        // 2026-07-21; kept identical to the TS sibling).
+        $summary = self::directionsSummary($data);
+        $summaryLen = (is_array($summary) && isset($summary['totalLength'])) ? $summary['totalLength'] : null;
+        $summaryTime = (is_array($summary) && isset($summary['totalTime'])) ? $summary['totalTime'] : null;
+
+        if ($summaryLen !== null) {
+            $totalDistanceMeters = self::toFloat($summaryLen);
+        } elseif (($attrs['Total_Length'] ?? null) !== null) {
+            $totalDistanceMeters = self::toFloat($attrs['Total_Length']);
+        } elseif (($attrs['Total_Kilometers'] ?? null) !== null) {
+            $totalDistanceMeters = self::toFloat($attrs['Total_Kilometers']) * 1000.0;
         } else {
-            $totalDistanceMeters = self::toFloat($totalLength);
+            $totalDistanceMeters = 0.0;
         }
 
-        $totalTimeMin = self::toFloat($attrs['Total_Time'] ?? $attrs['Total_TravelTime'] ?? 0);
+        if ($summaryTime !== null) {
+            $totalTimeMin = self::toFloat($summaryTime);
+        } else {
+            $totalTimeMin = self::toFloat($attrs['Total_Time'] ?? $attrs['Total_TravelTime'] ?? $attrs['Total_WalkTime'] ?? 0);
+        }
         $totalDurationSeconds = $totalTimeMin * self::MINUTES_TO_SECONDS;
 
         $legs = $this->reconstructLegs($data, $waypoints, $totalDistanceMeters, $totalDurationSeconds);
@@ -259,6 +294,30 @@ final class EsriRoutingConnector extends BaseConnector implements RoutingConnect
             waypointOrder: $waypointOrder,
             raw: $data,
         );
+    }
+
+    /**
+     * Extract the route-level directions summary (travel-mode-independent
+     * totals). ESRI returns `directions` either as a single object with a
+     * `summary` key or as a list whose first entry carries it.
+     *
+     * @param array<string, mixed> $data
+     * @return array<string, mixed>|null
+     */
+    private static function directionsSummary(array $data): ?array
+    {
+        $container = $data['directions'] ?? null;
+        if (!is_array($container)) {
+            return null;
+        }
+        if (isset($container['summary']) && is_array($container['summary'])) {
+            return $container['summary'];
+        }
+        if (isset($container[0]) && is_array($container[0]) && isset($container[0]['summary']) && is_array($container[0]['summary'])) {
+            return $container[0]['summary'];
+        }
+
+        return null;
     }
 
     /**
@@ -360,41 +419,40 @@ final class EsriRoutingConnector extends BaseConnector implements RoutingConnect
     }
 
     /**
-     * If `findBestSequence=true` was requested, ESRI reorders stops and may
-     * surface the resulting order in `routes.features[0].attributes.Stops`
-     * (CSV) or `directions[0].attributes.StopSequence`. Return null when not
-     * present.
+     * Derive the optimized visiting sequence when `findBestSequence=true` was
+     * requested. ESRI returns the `stops` FeatureSet (`returnStops=true`) in
+     * INPUT order, each stop carrying a 1-based `Sequence` = its position in the
+     * optimized route. Invert to the canonical `waypointOrder` = full visiting
+     * sequence of INPUT indices (`order[Sequence - 1] = inputIndex`). Return
+     * null when the sequence data is absent, incomplete, or malformed.
      *
      * @param array<string, mixed> $data
      * @return list<int>|null
      */
     private function extractWaypointOrder(array $data, int $totalStops): ?array
     {
-        $routes = (isset($data['routes']) && is_array($data['routes'])) ? $data['routes'] : [];
-        $features = (isset($routes['features']) && is_array($routes['features'])) ? $routes['features'] : [];
-        $feature = $features[0] ?? null;
-        if (!is_array($feature)) {
+        $stops = (isset($data['stops']) && is_array($data['stops'])) ? $data['stops'] : [];
+        $features = (isset($stops['features']) && is_array($stops['features'])) ? $stops['features'] : [];
+        if (count($features) !== $totalStops) {
             return null;
         }
-        $attrs = (isset($feature['attributes']) && is_array($feature['attributes'])) ? $feature['attributes'] : [];
 
-        // Format A: `Stops` as a comma-separated string of input indices.
-        if (isset($attrs['Stops']) && is_string($attrs['Stops']) && $attrs['Stops'] !== '') {
-            /** @var list<int> $order */
-            $order = [];
-            foreach (explode(',', $attrs['Stops']) as $piece) {
-                $piece = trim($piece);
-                if ($piece === '' || !is_numeric($piece)) {
-                    continue;
-                }
-                $order[] = (int) $piece;
+        $order = array_fill(0, $totalStops, -1);
+        $inputIdx = 0;
+        foreach ($features as $feature) {
+            if (!is_array($feature)) {
+                return null;
             }
-            if (count($order) === $totalStops) {
-                return $order;
+            $attrs = (isset($feature['attributes']) && is_array($feature['attributes'])) ? $feature['attributes'] : [];
+            $seq = $attrs['Sequence'] ?? null;
+            if (!is_int($seq) || $seq < 1 || $seq > $totalStops || $order[$seq - 1] !== -1) {
+                return null;
             }
+            $order[$seq - 1] = $inputIdx;
+            $inputIdx++;
         }
 
-        return null;
+        return $order;
     }
 
     /**
@@ -576,25 +634,6 @@ final class EsriRoutingConnector extends BaseConnector implements RoutingConnect
         }
 
         return $bucket;
-    }
-
-    /**
-     * Map {@see TravelMode} → ESRI World Route travel-mode name (mirrors TS).
-     * `driving` → null (omit field, ESRI default); `walking` → `'Walking'`;
-     * `cycling` → throw `unsupported_travel_mode` (no public ESRI cycling mode —
-     * was silently degrading to driving before).
-     */
-    private function mapTravelMode(TravelMode $mode): ?string
-    {
-        return match ($mode) {
-            TravelMode::Walking => 'Walking',
-            TravelMode::Cycling => throw new ConnectorError(
-                statusCode: null,
-                providerCode: ProviderCode::UnsupportedTravelMode,
-                providerMessage: 'ESRI Routing does not support travelMode "cycling"',
-            ),
-            TravelMode::Driving => null,
-        };
     }
 
     private function stringifyFormValue(mixed $value): string

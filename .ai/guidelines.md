@@ -29,8 +29,9 @@ composer install
 composer test && composer phpstan && composer cs
 ```
 
-PHP ≥8.2, `declare(strict_types=1)` on every file. **Zero runtime deps / no vendor SDKs** —
-consumers bring a PSR-18 client (resolved via `php-http/discovery`); SigV4 for Esri is hand-rolled.
+PHP ≥8.2, `declare(strict_types=1)` on every file. **No vendor SDKs** — `php-http/discovery`
+is the only runtime dependency (it auto-wires a PSR-18 client when the consumer injects none);
+otherwise consumers bring their own PSR-18 client; SigV4 for Esri is hand-rolled.
 
 ## Add a connector
 
@@ -60,7 +61,7 @@ license + no-vendor-SDK gates.
 
 Full reasoning lives in [`ARCHITECTURE.md`](./ARCHITECTURE.md); the short list:
 
-- **Zero runtime deps / no vendor SDKs.**
+- **No vendor SDKs.** `php-http/discovery` is the only runtime dependency (auto-wires a PSR-18 client when none is injected).
 - **Stateless wrapper.** No caching, retries, idempotency keys, or telemetry. (HERE Matrix submit/poll/retrieve is transient, inside a single call.)
 - **≥90% baseline-coverage rule.** A field belongs on the base operation input only if ≥90% of that operation's providers support it; everything else goes to `_passthrough` (input) / `raw` (output) or a narrowed type.
 - **Normalize at the wire layer.** Distance → meters, duration → seconds, coordinates → `{ lat, lng }`, geometry → Google precision-5 polyline. The four `Polyline` methods are locked at v1.0, cross-language-parity with the TS lib.

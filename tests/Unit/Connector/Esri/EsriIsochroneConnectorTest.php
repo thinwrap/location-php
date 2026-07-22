@@ -216,8 +216,16 @@ final class EsriIsochroneConnectorTest extends TestCase
             travelMode: TravelMode::Walking,
         ));
 
+        // ArcGIS requires a full travel-mode JSON object, not a name string
+        // (a bare "Walking Time" is ignored and the service stays on driving).
         $body = (string) $client->captured[0]->getBody();
-        self::assertStringContainsString('travelMode=Walking+Time', $body);
+        parse_str($body, $parsed);
+        self::assertIsString($parsed['travelMode'] ?? null);
+        /** @var array<string,mixed> $travelMode */
+        $travelMode = json_decode((string) $parsed['travelMode'], true, 512, JSON_THROW_ON_ERROR);
+        self::assertSame('WALK', $travelMode['type']);
+        self::assertSame('WalkTime', $travelMode['impedanceAttributeName']);
+        self::assertSame('Walking Time', $travelMode['name']);
     }
 
     #[Test]

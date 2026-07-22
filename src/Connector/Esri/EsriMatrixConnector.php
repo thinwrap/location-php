@@ -17,14 +17,13 @@ use Thinwrap\Location\DTO\Matrix\MatrixOptions;
 use Thinwrap\Location\DTO\Matrix\MatrixResult;
 use Thinwrap\Location\Enum\LocationProviderId;
 use Thinwrap\Location\Enum\ProviderCode;
-use Thinwrap\Location\Enum\TravelMode;
 use Thinwrap\Location\Util\Passthrough;
 
 /**
  * Esri (ArcGIS) OD Cost Matrix connector — PHP mirror of the TS connector
  *
  * Posts to
- * https://logistics.arcgis.com/arcgis/rest/services/World/OriginDestinationCostMatrix/NAServer/OriginDestinationCostMatrix_World/solveODCostMatrix
+ * https://route-api.arcgis.com/arcgis/rest/services/World/OriginDestinationCostMatrix/NAServer/OriginDestinationCostMatrix_World/solveODCostMatrix
  * with `origins` and `destinations` as pipe-separated `lng,lat,id` triplets
  * (1-based IDs per ESRI convention; mirrors the wire format,
  *). Dual-auth (`apiKey` xor `arcgisToken`) is resolved via
@@ -36,16 +35,20 @@ use Thinwrap\Location\Util\Passthrough;
  * connector inspects the body even on success status codes and throws a
  * {@see ConnectorError} for either path.
  *
- * Result-shape conversion: `odLines.features[]` carries 1-based
- * `OriginOID` / `DestinationOID` plus `Total_Distance` (miles) and
- * `Total_Time` (minutes). The connector decrements indices and converts to
- * meters/seconds. Retry-After surfaces via parsed seconds in providerMessage
- * plus raw header in `cause.retryAfter` (no structured field by design).
+ * Result-shape conversion: the primary `esriNAODOutputSparseMatrix` response
+ * maps each 1-based origin OID to `{ <destOID>: [values...] }` alongside a
+ * `costAttributeNames` list naming the value columns; the connector reads
+ * `TravelTime` (minutes → × 60 s) and `Kilometers` (km → × 1000 m). An
+ * `odLines.features[]` straight-lines response is parsed as a fallback via
+ * 1-based `OriginID` / `DestinationID` + `Total_TravelTime` (minutes) /
+ * `Total_Kilometers` (km). Retry-After surfaces via parsed seconds in
+ * providerMessage plus raw header in `cause.retryAfter` (no structured field
+ * by design).
  */
 final class EsriMatrixConnector extends BaseConnector implements MatrixConnectorInterface
 {
-    private const MATRIX_URL = 'https://logistics.arcgis.com/arcgis/rest/services/World/OriginDestinationCostMatrix/NAServer/OriginDestinationCostMatrix_World/solveODCostMatrix';
-    private const MILES_TO_METERS = 1609.344;
+    private const MATRIX_URL = 'https://route-api.arcgis.com/arcgis/rest/services/World/OriginDestinationCostMatrix/NAServer/OriginDestinationCostMatrix_World/solveODCostMatrix';
+    private const KM_TO_METERS = 1000;
     private const MINUTES_TO_SECONDS = 60;
 
     public function __construct(
@@ -75,21 +78,25 @@ final class EsriMatrixConnector extends BaseConnector implements MatrixConnector
             );
         }
 
-        $originsParam = $this->encodeStops($options->origins);
-        $destinationsParam = $this->encodeStops($options->destinations);
+        $originsParam = $this->encodeStops($options->origins, 'Esri matrix origin');
+        $destinationsParam = $this->encodeStops($options->destinations, 'Esri matrix destination');
 
-        // Esri matrix now READS travelMode (previously dropped — walking
-        // never reached the wire and cycling silently degraded to driving).
-        // `walking` → `'Walking'`; `cycling` → throw `unsupported_travel_mode`;
-        // `driving` → omit the field (ESRI default).
-        $travelMode = self::mapTravelMode($options->travelMode);
+        // `walking` embeds the canonical World "Walking Time" JSON object (a bare
+        // name string is ignored by ArcGIS); `cycling` throws
+        // `unsupported_travel_mode`; `driving` omits the field (ESRI default).
+        $travelMode = EsriTravelModes::map($options->travelMode, 'Matrix');
 
         $form = [
             'f' => 'json',
             'token' => $this->config->bearerToken(),
             'origins' => $originsParam,
             'destinations' => $destinationsParam,
-            'outputType' => 'esriNAODOutputStraightLine',
+            // TravelTime impedance (minutes) is auto-included in the output;
+            // accumulate Kilometers to surface road distance. The sparse
+            // matrix is the primary output shape (mirrors the go/py/ts libs).
+            'impedanceAttributeName' => 'TravelTime',
+            'accumulateAttributeNames' => 'Kilometers',
+            'outputType' => 'esriNAODOutputSparseMatrix',
         ];
 
         if ($travelMode !== null) {
@@ -136,7 +143,7 @@ final class EsriMatrixConnector extends BaseConnector implements MatrixConnector
             );
         }
 
-        return $this->normalizeSuccess($data);
+        return $this->normalizeSuccess($data, $originCount, $destinationCount);
     }
 
     /**
@@ -144,12 +151,19 @@ final class EsriMatrixConnector extends BaseConnector implements MatrixConnector
      * with 1-based IDs.
      *
      * @param list<\Thinwrap\Location\DTO\LatLng> $stops
+     * @param string $context finiteness-error label (e.g. "Esri matrix origin")
      */
-    private function encodeStops(array $stops): string
+    private function encodeStops(array $stops, string $context): string
     {
         $parts = [];
         foreach ($stops as $i => $stop) {
-            $parts[] = "{$stop->lng},{$stop->lat}," . ($i + 1);
+            // reject NaN/INF before interpolation — a non-finite float in
+            // "{$stop->lng}" would emit the literal "NAN"/"INF" onto the wire
+            // instead of raising the unified InvalidRequest ConnectorError.
+            $stop->assertFinite($context);
+            // formatLng/Lat force fixed-point notation; string interpolation of the
+            // raw floats emits scientific notation for near-zero coords.
+            $parts[] = $stop->formatLng() . ',' . $stop->formatLat() . ',' . ($i + 1);
         }
 
         return implode(';', $parts);
@@ -158,12 +172,98 @@ final class EsriMatrixConnector extends BaseConnector implements MatrixConnector
     /**
      * Normalize a 2xx ESRI response into a {@see MatrixResult}.
      *
-     * `odLines.features[]` carries 1-based OIDs (subtract 1) and totals in
-     * miles (× 1609.344) / minutes (× 60).
+     * Prefers the primary `esriNAODOutputSparseMatrix` shape (`odCostMatrix`)
+     * and falls back to the `odLines.features[]` straight-lines shape. Both
+     * decrement 1-based OIDs to 0-based indices and convert TravelTime minutes
+     * → seconds (× 60) and Kilometers → meters (× 1000).
      *
      * @param array<string, mixed> $data
      */
-    private function normalizeSuccess(array $data): MatrixResult
+    private function normalizeSuccess(array $data, int $originCount, int $destinationCount): MatrixResult
+    {
+        if (isset($data['odCostMatrix']) && is_array($data['odCostMatrix'])) {
+            return $this->normalizeSparseMatrix($data['odCostMatrix'], $data, $originCount, $destinationCount);
+        }
+
+        return $this->normalizeOdLines($data, $originCount, $destinationCount);
+    }
+
+    /**
+     * Parse the primary `esriNAODOutputSparseMatrix` output.
+     *
+     * `odCostMatrix` maps each 1-based origin OID to
+     * `{ <destOID>: [values in costAttributeNames order] }`, plus a
+     * `costAttributeNames` sibling listing the value columns. This connector
+     * requests impedance `TravelTime` (minutes) and accumulated `Kilometers`,
+     * so it locates those columns by name: duration = TravelTime × 60 s,
+     * distance = Kilometers × 1000 m. OIDs outside the requested dimensions or
+     * non-numeric are skipped rather than emitting fabricated cells.
+     *
+     * @param array<array-key, mixed> $odCostMatrix
+     * @param array<string, mixed> $data
+     */
+    private function normalizeSparseMatrix(array $odCostMatrix, array $data, int $originCount, int $destinationCount): MatrixResult
+    {
+        $names = (isset($odCostMatrix['costAttributeNames']) && is_array($odCostMatrix['costAttributeNames']))
+            ? array_values($odCostMatrix['costAttributeNames'])
+            : [];
+        // The impedance column is named after the active travel mode: driving
+        // reports `TravelTime`, walking reports `WalkTime` (the WALK travelMode
+        // object overrides the requested `impedanceAttributeName`). Locate it by
+        // the known time-impedance names rather than assuming `TravelTime`, else a
+        // walking matrix silently decodes every duration as 0.
+        $timeIdx = false;
+        foreach (EsriTravelModes::TIME_ATTRIBUTE_NAMES as $candidate) {
+            $idx = array_search($candidate, $names, true);
+            if ($idx !== false) {
+                $timeIdx = $idx;
+                break;
+            }
+        }
+        $distIdx = array_search('Kilometers', $names, true);
+
+        $cells = [];
+        foreach ($odCostMatrix as $originKey => $destinations) {
+            if ($originKey === 'costAttributeNames' || !is_array($destinations)) {
+                continue;
+            }
+            $originOid = self::toInt($originKey);
+            if ($originOid < 1 || $originOid > $originCount) {
+                continue;
+            }
+            foreach ($destinations as $destKey => $values) {
+                if (!is_array($values)) {
+                    continue;
+                }
+                $destOid = self::toInt($destKey);
+                if ($destOid < 1 || $destOid > $destinationCount) {
+                    continue;
+                }
+                $timeMinutes = ($timeIdx !== false && isset($values[$timeIdx])) ? self::toFloat($values[$timeIdx]) : 0.0;
+                $distKm = ($distIdx !== false && isset($values[$distIdx])) ? self::toFloat($values[$distIdx]) : 0.0;
+
+                $cells[] = new MatrixCell(
+                    originIndex: $originOid - 1,
+                    destinationIndex: $destOid - 1,
+                    distanceMeters: $distKm * self::KM_TO_METERS,
+                    durationSeconds: $timeMinutes * self::MINUTES_TO_SECONDS,
+                );
+            }
+        }
+
+        return new MatrixResult(cells: $cells, raw: $data);
+    }
+
+    /**
+     * Parse the `esriNAODOutputStraightLines` fallback output.
+     *
+     * `odLines.features[]` carries 1-based `OriginID` / `DestinationID` and
+     * totals `Total_TravelTime` (minutes) / `Total_Kilometers` (km). OIDs
+     * outside the requested dimensions or non-numeric are skipped.
+     *
+     * @param array<string, mixed> $data
+     */
+    private function normalizeOdLines(array $data, int $originCount, int $destinationCount): MatrixResult
     {
         $odLines = (isset($data['odLines']) && is_array($data['odLines'])) ? $data['odLines'] : [];
         $features = (isset($odLines['features']) && is_array($odLines['features'])) ? $odLines['features'] : [];
@@ -175,20 +275,19 @@ final class EsriMatrixConnector extends BaseConnector implements MatrixConnector
             }
             $attrs = (isset($feature['attributes']) && is_array($feature['attributes'])) ? $feature['attributes'] : [];
 
-            $originOid = self::toInt($attrs['OriginOID'] ?? 0);
-            $destOid = self::toInt($attrs['DestinationOID'] ?? 0);
-            // Skip features with missing/non-numeric OIDs (< 1, ESRI is 1-based)
-            // rather than emitting a fabricated `-1`-indexed cell.
-            if ($originOid < 1 || $destOid < 1) {
+            $originId = self::toInt($attrs['OriginID'] ?? 0);
+            $destId = self::toInt($attrs['DestinationID'] ?? 0);
+            if ($originId < 1 || $originId > $originCount || $destId < 1 || $destId > $destinationCount) {
                 continue;
             }
-            $totalDistanceMiles = self::toFloat($attrs['Total_Distance'] ?? 0);
-            $totalTimeMinutes = self::toFloat($attrs['Total_Time'] ?? 0);
+
+            $totalKilometers = self::toFloat($attrs['Total_Kilometers'] ?? 0);
+            $totalTimeMinutes = self::toFloat($attrs['Total_TravelTime'] ?? 0);
 
             $cells[] = new MatrixCell(
-                originIndex: $originOid - 1,
-                destinationIndex: $destOid - 1,
-                distanceMeters: $totalDistanceMiles * self::MILES_TO_METERS,
+                originIndex: $originId - 1,
+                destinationIndex: $destId - 1,
+                distanceMeters: $totalKilometers * self::KM_TO_METERS,
                 durationSeconds: $totalTimeMinutes * self::MINUTES_TO_SECONDS,
             );
         }
@@ -373,25 +472,6 @@ final class EsriMatrixConnector extends BaseConnector implements MatrixConnector
         }
 
         return $bucket;
-    }
-
-    /**
-     * Map {@see TravelMode} → ESRI matrix travel-mode name (mirrors TS).
-     * `driving` → null (omit field, ESRI default); `walking` → `'Walking'`;
-     * `cycling` → throw `unsupported_travel_mode` (ESRI World OD Cost Matrix
-     * ships no public cycling mode).
-     */
-    private static function mapTravelMode(TravelMode $mode): ?string
-    {
-        return match ($mode) {
-            TravelMode::Walking => 'Walking',
-            TravelMode::Cycling => throw new ConnectorError(
-                statusCode: null,
-                providerCode: ProviderCode::UnsupportedTravelMode,
-                providerMessage: 'ESRI Matrix does not support travelMode "cycling"',
-            ),
-            TravelMode::Driving => null,
-        };
     }
 
     private function stringifyFormValue(mixed $value): string

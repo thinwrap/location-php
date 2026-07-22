@@ -27,10 +27,12 @@ use Thinwrap\Location\Util\Polyline;
  * Mapbox routing connector — PHP mirror of the TS connector (the architectural
  * outlier). Dispatches between two endpoints based on the optimization flags:
  *
- *   - `GET  /directions/v5/mapbox/{profile}/{coords}` for plain routing.
- *   - `POST /optimized-trips/v2`                    when any of
+ *   - `GET /directions/v5/mapbox/{profile}/{coords}` for plain routing.
+ *   - `GET /optimized-trips/v1/mapbox/{profile}/{coords}` for waypoint-order
+ *     optimization (single-vehicle TSP) when any of
  *     `optimize | optimizeFixedOrigin | optimizeFixedDestination | isRoundTrip`
- *     is set.
+ *     is set. (v1 is the single-route optimizer matching every sibling provider;
+ *     v2 is a fleet/VRP product for a future multi-vehicle surface.)
  *
  * Mapbox returns precision-6 polyline geometry by default (we ask for
  * `geometries=polyline6`). The result is decoded with a connector-private
@@ -46,7 +48,7 @@ use Thinwrap\Location\Util\Polyline;
 final class MapboxRoutingConnector extends BaseConnector implements RoutingConnectorInterface
 {
     private const DIRECTIONS_URL = 'https://api.mapbox.com/directions/v5/mapbox';
-    private const OPTIMIZED_TRIPS_URL = 'https://api.mapbox.com/optimized-trips/v2';
+    private const OPTIMIZED_TRIPS_URL = 'https://api.mapbox.com/optimized-trips/v1/mapbox';
 
     public function __construct(
         private readonly MapboxConfig $config,
@@ -114,7 +116,7 @@ final class MapboxRoutingConnector extends BaseConnector implements RoutingConne
         }
 
         $routes = (isset($data['routes']) && is_array($data['routes'])) ? $data['routes'] : [];
-        // `/optimized-trips/v2` returns the routes under `trips`.
+        // `/optimized-trips/v1` returns the routes under `trips`.
         if ($routes === [] && isset($data['trips']) && is_array($data['trips'])) {
             $routes = $data['trips'];
         }
@@ -196,37 +198,45 @@ final class MapboxRoutingConnector extends BaseConnector implements RoutingConne
     }
 
     /**
-     * `/optimized-trips/v2` POST dispatch (outlier branch).
+     * `/optimized-trips/v1` GET dispatch (waypoint-order optimization; the
+     * single-vehicle optimizer that matches every sibling provider — v2 is a
+     * fleet/VRP product for a future multi-vehicle surface).
+     *
+     * v1 (OSRM-trip-based) rejects source=any + destination=any + roundtrip=false,
+     * so plain `optimize` (and the both-fixed case) keeps BOTH endpoints and
+     * reorders the intermediates, matching Google/TomTom/HERE/Esri; the
+     * fixed-origin/-destination flags pin just their endpoint and free the other;
+     * `isRoundTrip` returns to the first waypoint.
      */
     private function dispatchOptimized(RoutingOptions $options, string $profile): ResponseInterface
     {
-        $coordinates = array_map(
-            static fn(LatLng $c): array => [$c->lng, $c->lat],
-            $options->waypoints,
-        );
-
-        /** @var array<string, mixed> $body */
-        $body = [
-            'coordinates' => $coordinates,
-            'profile' => $profile,
-            'roundtrip' => $options->isRoundTrip,
-        ];
-
-        if ($options->optimizeFixedOrigin) {
-            $body['source'] = 'first';
-        } elseif ($options->optimize) {
-            $body['source'] = 'any';
-        }
-
-        if ($options->optimizeFixedDestination) {
-            $body['destination'] = 'last';
-        } elseif ($options->optimize) {
-            $body['destination'] = 'any';
-        }
+        $coords = Coordinate::joinLngLat($options->waypoints, ';');
+        $url = self::OPTIMIZED_TRIPS_URL . "/{$profile}/{$coords}";
 
         $query = [
             'access_token' => $this->config->accessToken,
+            'geometries' => 'polyline6',
+            'overview' => 'full',
+            'steps' => 'true',
+            'annotations' => 'duration,distance',
+            'roundtrip' => $options->isRoundTrip ? 'true' : 'false',
         ];
+
+        if ($options->isRoundTrip) {
+            $query['source'] = 'first';
+        } elseif ($options->optimizeFixedOrigin && !$options->optimizeFixedDestination) {
+            $query['source'] = 'first';
+            $query['destination'] = 'any';
+        } elseif ($options->optimizeFixedDestination && !$options->optimizeFixedOrigin) {
+            $query['source'] = 'any';
+            $query['destination'] = 'last';
+        } else {
+            // Plain `optimize`, or both endpoints fixed: keep origin first and
+            // destination last, reorder the middle (the only any/any alternative
+            // v1 accepts for a non-roundtrip request).
+            $query['source'] = 'first';
+            $query['destination'] = 'last';
+        }
 
         $excludes = $this->buildExcludes($options);
         if ($excludes !== '') {
@@ -237,9 +247,9 @@ final class MapboxRoutingConnector extends BaseConnector implements RoutingConne
             $query['depart_at'] = $options->departureTime->format('c');
         }
 
-        $merged = Passthrough::merge($body, [], $query, $this->buildPassthroughBuckets($options));
+        $merged = Passthrough::merge([], [], $query, $this->buildPassthroughBuckets($options));
 
-        return $this->sendPostJson(self::OPTIMIZED_TRIPS_URL, $merged['body'], $merged['headers'], $merged['query']);
+        return $this->sendGet($url, $merged['headers'], $merged['query']);
     }
 
     private function buildExcludes(RoutingOptions $options): string

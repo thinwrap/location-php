@@ -203,6 +203,18 @@ final class HereMatrixConnector extends BaseConnector implements MatrixConnector
             $authHeaders = [];
             $statusResponse = $this->sendGet($statusUrl, $authHeaders, ['apiKey' => $this->config->apiKey]);
 
+            // Real HERE v8 behavior: on completion the poll returns
+            // `303 See Other` with `Location: <resultUrl>` and a body
+            // `{status:"completed", resultUrl}`. Guzzle's PSR-18 `sendRequest`
+            // forces `allow_redirects=false`, so the 303 surfaces here rather
+            // than being auto-followed. It MUST be handled BEFORE the generic
+            // `>= 300` error guard below (a 303 is not a success status and
+            // would otherwise raise). resultUrl is read from the body
+            // (preferred) or the `Location` response header.
+            if ($statusResponse->getStatusCode() === 303) {
+                return $this->requireResultUrl($this->decodeJson($statusResponse), $statusResponse);
+            }
+
             if ($statusResponse->getStatusCode() >= 300) {
                 $this->raiseHttpError($statusResponse, 'HERE Matrix poll');
             }
@@ -212,20 +224,11 @@ final class HereMatrixConnector extends BaseConnector implements MatrixConnector
                 ? $status['status']
                 : ((is_array($status) && isset($status['state']) && is_string($status['state'])) ? $status['state'] : null);
 
+            // A 200 body carrying status "completed" is also treated as
+            // completion (belt-and-braces alongside the 303 path above),
+            // resolving resultUrl from the body or the `Location` header.
             if ($state === 'completed') {
-                $resultUrl = (isset($status['resultUrl']) && is_string($status['resultUrl']))
-                    ? $status['resultUrl']
-                    : null;
-                if ($resultUrl === null) {
-                    throw new ConnectorError(
-                        statusCode: $statusResponse->getStatusCode(),
-                        providerCode: ProviderCode::Unknown,
-                        providerMessage: 'HERE Matrix poll completed without resultUrl',
-                        cause: $status,
-                    );
-                }
-
-                return $this->validateProviderUrl($resultUrl, 'resultUrl');
+                return $this->requireResultUrl($status, $statusResponse);
             }
 
             if ($state === 'failed') {
@@ -251,17 +254,87 @@ final class HereMatrixConnector extends BaseConnector implements MatrixConnector
     }
 
     /**
+     * Resolve the async `resultUrl` from a completed poll response: the decoded
+     * body's `resultUrl` (preferred; present in both the 303 body and any 200
+     * "completed" body) or the `Location` response header (set on the 303).
+     * Validates the resolved URL against the hereapi.com allow-list before
+     * returning; raises a typed {@see ConnectorError} when neither is present.
+     *
+     * @param mixed $body Decoded poll body (may be null/scalar/array).
+     */
+    private function requireResultUrl(mixed $body, ResponseInterface $response): string
+    {
+        $fromBody = (is_array($body) && isset($body['resultUrl']) && is_string($body['resultUrl']) && $body['resultUrl'] !== '')
+            ? $body['resultUrl']
+            : null;
+        $location = $response->getHeaderLine('Location');
+        $resultUrl = $fromBody ?? ($location !== '' ? $location : null);
+
+        if ($resultUrl === null) {
+            throw new ConnectorError(
+                statusCode: $response->getStatusCode(),
+                providerCode: ProviderCode::Unknown,
+                providerMessage: 'HERE Matrix poll completed without resultUrl',
+                cause: is_array($body) ? $body : null,
+            );
+        }
+
+        return $this->validateProviderUrl($resultUrl, 'resultUrl');
+    }
+
+    /**
      * Step 3: retrieve the final matrix payload and flatten to cells.
      */
     private function retrieve(string $resultUrl, MatrixOptions $options): MatrixResult
     {
-        $response = $this->sendGet($resultUrl, [], ['apiKey' => $this->config->apiKey]);
+        // Step 3a: GET the (already-validated hereapi.com) resultUrl WITH the
+        // apiKey and `Accept-Encoding: gzip`. HERE hard-requires both — 401
+        // Unauthorized without the key, 406 Not Acceptable without the gzip
+        // header. On success HERE does NOT return the payload inline: it
+        // responds `303 See Other` with `Location: <pre-signed S3 URL>`.
+        // Guzzle's PSR-18 `sendRequest` forces `allow_redirects=false`, so that
+        // 303 is observable here and we follow it MANUALLY below — the apiKey
+        // is never forwarded off the HERE host to the storage backend.
+        $response = $this->sendGet(
+            $resultUrl,
+            ['Accept-Encoding' => 'gzip'],
+            ['apiKey' => $this->config->apiKey],
+        );
+
+        // Step 3b: follow the single redirect hop to the pre-signed result URL
+        // WITHOUT the apiKey (or any HERE auth) — the signed URL is
+        // self-authenticating (it carries its own query signature) and lives on
+        // a non-HERE host, so it is intentionally NOT run through
+        // validateProviderUrl and never receives the key. A direct 200 (no
+        // redirect) is handled by simply skipping this hop.
+        $status = $response->getStatusCode();
+        if ($status >= 300 && $status < 400) {
+            $location = $response->getHeaderLine('Location');
+            if ($location === '') {
+                throw new ConnectorError(
+                    statusCode: $status,
+                    providerCode: ProviderCode::Unknown,
+                    providerMessage: 'HERE Matrix retrieve redirect missing Location header',
+                );
+            }
+            // The redirect target is a non-HERE (pre-signed storage) host so it
+            // isn't run through validateProviderUrl, but it MUST still be https —
+            // refuse a plaintext/other-scheme downgrade.
+            if (strtolower((string) parse_url($location, PHP_URL_SCHEME)) !== 'https') {
+                throw new ConnectorError(
+                    statusCode: $status,
+                    providerCode: ProviderCode::Unknown,
+                    providerMessage: 'HERE Matrix result redirect must be an https URL',
+                );
+            }
+            $response = $this->sendGet($location, ['Accept-Encoding' => 'gzip']);
+        }
 
         if ($response->getStatusCode() >= 300) {
             $this->raiseHttpError($response, 'HERE Matrix retrieve');
         }
 
-        $data = $this->decodeJson($response);
+        $data = $this->readMatrixBody($response);
         if (!is_array($data) || !isset($data['matrix']) || !is_array($data['matrix'])) {
             throw new ConnectorError(
                 statusCode: $response->getStatusCode(),
@@ -280,6 +353,10 @@ final class HereMatrixConnector extends BaseConnector implements MatrixConnector
             : count($options->origins);
         $travelTimes = (isset($matrix['travelTimes']) && is_array($matrix['travelTimes'])) ? array_values($matrix['travelTimes']) : [];
         $distances = (isset($matrix['distances']) && is_array($matrix['distances'])) ? array_values($matrix['distances']) : [];
+        // Per-cell status parallel to travelTimes/distances (0 = OK, 3 = usable
+        // despite a violated constraint); any other non-zero code marks that
+        // cell's value as unspecified.
+        $errorCodes = (isset($matrix['errorCodes']) && is_array($matrix['errorCodes'])) ? array_values($matrix['errorCodes']) : [];
 
         // flatten uses the vendor's own dimensions as the single source for
         // both stride (numDestinations) and bound (numOrigins × numDestinations).
@@ -299,6 +376,13 @@ final class HereMatrixConnector extends BaseConnector implements MatrixConnector
         for ($oi = 0; $oi < $numOrigins; $oi++) {
             for ($di = 0; $di < $numDestinations; $di++) {
                 $index = $oi * $numDestinations + $di;
+                // Omit cells HERE flagged as failed (errorCode not 0/3); their
+                // travelTimes/distances value is unspecified. Contract: failed
+                // entries are omitted from cells.
+                $errorCode = $errorCodes[$index] ?? null;
+                if ($errorCode !== null && $errorCode !== 0 && $errorCode !== 3) {
+                    continue;
+                }
                 $cells[] = new MatrixCell(
                     originIndex: $oi,
                     destinationIndex: $di,
@@ -461,6 +545,47 @@ final class HereMatrixConnector extends BaseConnector implements MatrixConnector
         if ($raw === '') {
             return null;
         }
+        try {
+            return json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return null;
+        }
+    }
+
+    /**
+     * Read + JSON-decode the retrieve body, decompressing defensively.
+     *
+     * HERE serves the matrix result gzip-compressed and hard-requires the
+     * `Accept-Encoding: gzip` request header (406 without it). Depending on the
+     * PSR-18 client, the body arrives either as raw gzip bytes (gzip magic
+     * `0x1f 0x8b`, `Content-Encoding: gzip`) or already inflated by the
+     * transport. We `gzdecode()` only when the bytes actually look gzipped, so
+     * an already-decompressed body (possibly still carrying a stray
+     * `Content-Encoding` header) is left untouched. Kept LOCAL to this
+     * connector per the per-connector-locality invariant.
+     *
+     * @return mixed Decoded JSON (array on success) or null when unparseable.
+     */
+    private function readMatrixBody(ResponseInterface $response): mixed
+    {
+        $raw = (string) $response->getBody();
+        if ($raw === '') {
+            return null;
+        }
+
+        $encoding = strtolower($response->getHeaderLine('Content-Encoding'));
+        $looksGzipped = str_contains($encoding, 'gzip')
+            || (strlen($raw) >= 2 && $raw[0] === "\x1f" && $raw[1] === "\x8b");
+
+        if ($looksGzipped) {
+            $decoded = @gzdecode($raw);
+            if (is_string($decoded)) {
+                $raw = $decoded;
+            }
+            // A `false` return means the transport already inflated the body
+            // but kept the Content-Encoding header — parse the bytes as-is.
+        }
+
         try {
             return json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
         } catch (\JsonException) {

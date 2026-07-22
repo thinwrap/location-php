@@ -1,6 +1,6 @@
 {
     "name": "thinwrap/location",
-    "description": "Lightweight, SDK-free PHP wrapper for routing, distance matrix, geocoding, and isochrone across Google, Mapbox, HERE, ESRI, TomTom, and OSRM. Stateless, PSR-18 BYO HTTP client, zero vendor dependencies.",
+    "description": "Lightweight, SDK-free PHP wrapper for routing, distance matrix, geocoding, and isochrone across Google, Mapbox, HERE, ESRI, TomTom, and OSRM. Stateless, PSR-18 BYO HTTP client; php-http/discovery is the only runtime dependency (auto-wires a PSR-18 client when none is injected); no vendor SDKs.",
     "type": "library",
     "license": "MIT",
     "keywords": [

@@ -39,29 +39,45 @@ final class HereMatrixConnectorTest extends TestCase
     #[Test]
     public function matrixRunsSubmitPollRetrieveCycleAndFlattens2dGrid(): void
     {
+        // Real HERE v8 async shapes (verified live 2026-07-20):
+        //   poll completion  = HTTP 303 + `Location: <resultUrl>` + body with resultUrl
+        //   retrieve step 3a = resultUrl → HTTP 303 → `Location: <pre-signed S3 URL>`
+        //   retrieve step 3b = S3 → HTTP 200 gzip matrix body
+        // The resolved hosts below are SAMPLE data — the connector reads them at
+        // runtime from the responses; nothing here is hardcoded into the code.
         $submitJson = (string) json_encode([
             'matrixId' => 'm1',
             'statusUrl' => 'https://matrix.router.hereapi.com/v8/status/m1',
         ]);
         $pendingJson = (string) json_encode(['status' => 'inProgress']);
+        // Completion resultUrl lives on the aws-eu-west-1.*.hereapi.com host —
+        // covered by the `*.hereapi.com` allow-list.
+        $resultUrl = 'https://aws-eu-west-1.matrix.router.hereapi.com/v8/matrix/m1/result';
         $completedJson = (string) json_encode([
+            'matrixId' => 'm1',
             'status' => 'completed',
-            'resultUrl' => 'https://matrix.router.hereapi.com/v8/result/m1',
+            'resultUrl' => $resultUrl,
         ]);
-        $resultJson = (string) json_encode([
+        // Pre-signed S3 object URL (non-HERE host, query-signed) — sample.
+        $s3Url = 'https://s3.eu-west-1.amazonaws.com/matrix-results/m1.json.gz'
+            . '?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeef';
+        // HERE serves the matrix result gzip-compressed.
+        $resultGz = (string) gzencode((string) json_encode([
+            'matrixId' => 'm1',
             'matrix' => [
                 'numOrigins' => 2,
                 'numDestinations' => 2,
                 'travelTimes' => [0, 120, 130, 0],
                 'distances' => [0, 2000, 2100, 0],
             ],
-        ]);
+        ]));
 
         $client = self::sequencedClient([
             new Response(200, [], $submitJson),
             new Response(200, [], $pendingJson),
-            new Response(200, [], $completedJson),
-            new Response(200, [], $resultJson),
+            new Response(303, ['Location' => $resultUrl], $completedJson),
+            new Response(303, ['Location' => $s3Url], ''),
+            new Response(200, ['Content-Encoding' => 'gzip'], $resultGz),
         ]);
 
         $connector = self::makeConnector($client);
@@ -71,7 +87,8 @@ final class HereMatrixConnectorTest extends TestCase
             destinations: [new LatLng(52.51, 13.39), new LatLng(52.50, 13.41)],
         ));
 
-        self::assertCount(4, $client->captured);
+        // submit + 2 polls + resultUrl GET + S3 hop = 5 calls.
+        self::assertCount(5, $client->captured);
 
         // Call 1: submit (POST, async=true).
         $submit = $client->captured[0];
@@ -83,7 +100,7 @@ final class HereMatrixConnectorTest extends TestCase
         self::assertStringContainsString('async=true', (string) $submit->getUri());
         self::assertStringContainsString('apiKey=', (string) $submit->getUri());
 
-        // Call 2 + 3: poll (GET to statusUrl).
+        // Call 2 + 3: poll (GET to statusUrl); completion arrives as a 303.
         self::assertSame('GET', $client->captured[1]->getMethod());
         self::assertStringStartsWith(
             'https://matrix.router.hereapi.com/v8/status/m1',
@@ -91,14 +108,23 @@ final class HereMatrixConnectorTest extends TestCase
         );
         self::assertSame('GET', $client->captured[2]->getMethod());
 
-        // Call 4: retrieve (GET to resultUrl).
-        self::assertSame('GET', $client->captured[3]->getMethod());
-        self::assertStringStartsWith(
-            'https://matrix.router.hereapi.com/v8/result/m1',
-            (string) $client->captured[3]->getUri(),
-        );
+        // Call 4: retrieve resultUrl — GET with the apiKey AND Accept-Encoding: gzip.
+        $retrieve = $client->captured[3];
+        self::assertSame('GET', $retrieve->getMethod());
+        self::assertStringStartsWith($resultUrl, (string) $retrieve->getUri());
+        self::assertStringContainsString('apiKey=', (string) $retrieve->getUri());
+        self::assertSame('gzip', $retrieve->getHeaderLine('Accept-Encoding'));
 
-        // Cells flattened: 2x2 grid, 4 entries.
+        // Call 5: the S3 hop — plain GET, NO HERE apiKey (self-signed, non-HERE host).
+        $s3 = $client->captured[4];
+        self::assertSame('GET', $s3->getMethod());
+        self::assertStringStartsWith('https://s3.eu-west-1.amazonaws.com/', (string) $s3->getUri());
+        self::assertStringNotContainsString('apiKey', (string) $s3->getUri());
+        self::assertStringNotContainsString('test-here-key', (string) $s3->getUri());
+        self::assertSame('gzip', $s3->getHeaderLine('Accept-Encoding'));
+
+        // Cells flattened: 2x2 grid, 4 entries. distances are METERS and
+        // travelTimes are SECONDS — used as-is (no conversion).
         self::assertCount(4, $result->cells);
         self::assertSame(0, $result->cells[0]->originIndex);
         self::assertSame(0, $result->cells[0]->destinationIndex);
@@ -112,6 +138,88 @@ final class HereMatrixConnectorTest extends TestCase
         self::assertSame(0, $result->cells[2]->destinationIndex);
         self::assertSame(130.0, $result->cells[2]->durationSeconds);
         self::assertSame(2100.0, $result->cells[2]->distanceMeters);
+    }
+
+    #[Test]
+    public function matrixRetrieveHandlesDirect200PlainBodyWithoutS3Hop(): void
+    {
+        // Some responses return the matrix inline as a plain 200 (no S3 hop,
+        // no gzip) — the connector must handle that shape too. Also locks in
+        // the units contract: distances METERS, travelTimes SECONDS, as-is.
+        $client = self::sequencedClient([
+            new Response(200, [], (string) json_encode([
+                'matrixId' => 'm-direct',
+                'statusUrl' => 'https://matrix.router.hereapi.com/v8/status/m-direct',
+            ])),
+            new Response(
+                303,
+                ['Location' => 'https://matrix.router.hereapi.com/v8/matrix/m-direct/result'],
+                (string) json_encode([
+                    'status' => 'completed',
+                    'resultUrl' => 'https://matrix.router.hereapi.com/v8/matrix/m-direct/result',
+                ]),
+            ),
+            new Response(200, [], (string) json_encode([
+                'matrix' => [
+                    'numOrigins' => 1,
+                    'numDestinations' => 1,
+                    'travelTimes' => [5427],
+                    'distances' => [109144],
+                ],
+            ])),
+        ]);
+        $connector = self::makeConnector($client, static function (int $_us): void {});
+
+        $result = $connector->matrix(new MatrixOptions(
+            origins: [new LatLng(40.7484, -73.9857)],
+            destinations: [new LatLng(41.1792, -73.1952)],
+        ));
+
+        // submit + poll(303) + retrieve(direct 200) = 3 calls; NO S3 hop.
+        self::assertCount(3, $client->captured);
+        self::assertCount(1, $result->cells);
+        self::assertSame(109144.0, $result->cells[0]->distanceMeters);
+        self::assertSame(5427.0, $result->cells[0]->durationSeconds);
+    }
+
+    #[Test]
+    public function matrixRetrieveDecompressesGzipDetectedByMagicBytes(): void
+    {
+        // gzip body served WITHOUT a Content-Encoding header — decompression
+        // must fall back to sniffing the 0x1f 0x8b gzip magic bytes.
+        $resultGz = (string) gzencode((string) json_encode([
+            'matrix' => [
+                'numOrigins' => 1,
+                'numDestinations' => 1,
+                'travelTimes' => [5427],
+                'distances' => [109144],
+            ],
+        ]));
+        $client = self::sequencedClient([
+            new Response(200, [], (string) json_encode([
+                'matrixId' => 'm-gz',
+                'statusUrl' => 'https://matrix.router.hereapi.com/v8/status/m-gz',
+            ])),
+            new Response(
+                303,
+                ['Location' => 'https://aws-eu-west-1.matrix.router.hereapi.com/v8/matrix/m-gz/result'],
+                (string) json_encode([
+                    'status' => 'completed',
+                    'resultUrl' => 'https://aws-eu-west-1.matrix.router.hereapi.com/v8/matrix/m-gz/result',
+                ]),
+            ),
+            new Response(200, [], $resultGz),
+        ]);
+        $connector = self::makeConnector($client, static function (int $_us): void {});
+
+        $result = $connector->matrix(new MatrixOptions(
+            origins: [new LatLng(40.7484, -73.9857)],
+            destinations: [new LatLng(41.1792, -73.1952)],
+        ));
+
+        self::assertCount(1, $result->cells);
+        self::assertSame(109144.0, $result->cells[0]->distanceMeters);
+        self::assertSame(5427.0, $result->cells[0]->durationSeconds);
     }
 
     #[Test]

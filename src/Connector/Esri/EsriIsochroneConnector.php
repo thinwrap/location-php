@@ -20,7 +20,6 @@ use Thinwrap\Location\DTO\Passthrough as PassthroughDTO;
 use Thinwrap\Location\Enum\IsochroneType;
 use Thinwrap\Location\Enum\LocationProviderId;
 use Thinwrap\Location\Enum\ProviderCode;
-use Thinwrap\Location\Enum\TravelMode;
 use Thinwrap\Location\Util\IsochroneValidator;
 use Thinwrap\Location\Util\Passthrough;
 
@@ -42,8 +41,9 @@ use Thinwrap\Location\Util\Passthrough;
  * meters are passed through with `esriDriveDistanceUnitsMeters`.
  *
  * Travel mode: base `'driving'` uses the ESRI default (no
- * `travelMode` field); `'walking'` maps to `'Walking Time'`. ESRI does NOT
- * carry cycling at the base level.
+ * `travelMode` field); `'walking'` embeds the canonical World "Walking Time"
+ * travel-mode object (see {@see EsriTravelModes::map()}) — ArcGIS requires a full
+ * JSON object, not a name string. ESRI does NOT carry cycling at the base level.
  *
  * Response normalization: ESRI returns
  * `saPolygons.features[i].geometry.rings: number[][][]` already in
@@ -90,8 +90,12 @@ final class EsriIsochroneConnector extends BaseConnector implements IsochroneCon
 
         // ESRI native units: minutes for time, meters for distance.
         if ($options->type === IsochroneType::Time) {
+            // ESRI accepts FRACTIONAL minutes, so convert seconds losslessly
+            // rather than rounding to whole minutes (which corrupted sub-minute
+            // breaks: 30s → 1 min → 60s, and 20s → 0). Trim to 6 decimals only to
+            // strip float noise.
             $breaks = implode(',', array_map(
-                static fn(int|float $v): int => (int) round($v / 60),
+                static fn(int|float $v): string => rtrim(rtrim(number_format($v / 60, 6, '.', ''), '0'), '.'),
                 $options->values,
             ));
             $breakUnits = 'esriDriveTimeUnitsMinutes';
@@ -116,7 +120,7 @@ final class EsriIsochroneConnector extends BaseConnector implements IsochroneCon
             'outSR' => '4326',
         ];
 
-        $travelMode = self::mapTravelMode($options->travelMode);
+        $travelMode = EsriTravelModes::map($options->travelMode, 'Isochrone');
         if ($travelMode !== null) {
             $form['travelMode'] = $travelMode;
         }
@@ -222,16 +226,6 @@ final class EsriIsochroneConnector extends BaseConnector implements IsochroneCon
                 ],
             ],
         ];
-    }
-
-    private static function mapTravelMode(?TravelMode $mode): ?string
-    {
-        // Null/driving → no `travelMode` field (ESRI default driving). Cycling is
-        // rejected upstream at the IsochroneOptions DTO.
-        return match ($mode) {
-            TravelMode::Walking => 'Walking Time',
-            default => null,
-        };
     }
 
     private static function stringifyFormValue(mixed $value): string

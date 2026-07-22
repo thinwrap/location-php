@@ -162,34 +162,38 @@ final class TomTomRoutingConnectorTest extends TestCase
     }
 
     #[Test]
-    public function routeSendsComputeBestOrderWhenOptimizeIsTrueWithThreeWaypoints(): void
+    public function routeSendsComputeBestOrderWhenOptimizeIsTrueWithMultipleWaypoints(): void
     {
         $recorder = self::recordingClient(self::happyResponse(optimized: true));
         $connector = self::makeConnector($recorder);
 
+        // Input [A,B,C,D]; origin A(0)/destination D(3) fixed, only the 2
+        // intermediates B(1),C(2) are reordered. optimizedWaypoints covers ONLY
+        // those intermediates (providedIndex 0-based over them).
         $result = $connector->route(new RoutingOptions(
             waypoints: [
                 new LatLng(40.7128, -74.006),
                 new LatLng(40.73, -73.995),
                 new LatLng(40.758, -73.9855),
+                new LatLng(40.77, -73.98),
             ],
             optimize: true,
         ));
 
         self::assertNotNull($recorder->captured);
         self::assertStringContainsString('computeBestOrder=true', (string) $recorder->captured->getUri());
-        // optimizedWaypoints sorted by optimizedIndex -> providedIndex projection.
-        self::assertSame([1, 0], $result->waypointOrder);
+        // Intermediates projected to input indices + bracketed by origin(0)/dest(3).
+        self::assertSame([0, 2, 1, 3], $result->waypointOrder);
     }
 
     #[Test]
     public function routeEmitsCanonicalWaypointOrderFullVisitingSequence(): void
     {
         // Cross-language canonical waypointOrder parity fixture (PINNED).
-        // Logical input [A,B,C,D]; optimal visiting order A,C,B,D ⇒ canonical
-        // [0,2,1,3]. TomTom reports optimizedWaypoints {providedIndex,
-        // optimizedIndex}; sorting by optimizedIndex and projecting providedIndex
-        // yields [0,2,1,3]. Mirrors the TS sibling parity fixture exactly.
+        // Logical input [A,B,C,D,E]; origin A(0)/destination E(4) fixed;
+        // intermediates B,C,D (input 1,2,3, providedIndex 0,1,2) reordered to
+        // visit D,B,C. TomTom's optimizedWaypoints is intermediate-relative;
+        // projected to input indices and bracketed by origin/dest → [0,3,1,2,4].
         $payload = [
             'routes' => [[
                 'summary' => ['lengthInMeters' => 8000, 'travelTimeInSeconds' => 480],
@@ -197,15 +201,14 @@ final class TomTomRoutingConnectorTest extends TestCase
                     'summary' => ['lengthInMeters' => 8000, 'travelTimeInSeconds' => 480],
                     'points' => [
                         ['latitude' => 0, 'longitude' => 0],
-                        ['latitude' => 3, 'longitude' => 3],
+                        ['latitude' => 4, 'longitude' => 4],
                     ],
                 ]],
             ]],
             'optimizedWaypoints' => [
-                ['providedIndex' => 0, 'optimizedIndex' => 0],
-                ['providedIndex' => 2, 'optimizedIndex' => 1],
+                ['providedIndex' => 2, 'optimizedIndex' => 0],
+                ['providedIndex' => 0, 'optimizedIndex' => 1],
                 ['providedIndex' => 1, 'optimizedIndex' => 2],
-                ['providedIndex' => 3, 'optimizedIndex' => 3],
             ],
         ];
 
@@ -214,11 +217,11 @@ final class TomTomRoutingConnectorTest extends TestCase
         ));
 
         $result = $connector->route(new RoutingOptions(
-            waypoints: [new LatLng(0, 0), new LatLng(1, 1), new LatLng(2, 2), new LatLng(3, 3)],
+            waypoints: [new LatLng(0, 0), new LatLng(1, 1), new LatLng(2, 2), new LatLng(3, 3), new LatLng(4, 4)],
             optimize: true,
         ));
 
-        self::assertSame([0, 2, 1, 3], $result->waypointOrder);
+        self::assertSame([0, 3, 1, 2, 4], $result->waypointOrder);
     }
 
     #[Test]

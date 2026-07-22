@@ -134,7 +134,10 @@ final class GoogleGeocodingConnector extends BaseConnector implements GeocodingC
 
         /** @var array<string, string|int|float|bool> $query */
         $query = [
-            'latlng' => $options->location->lat . ',' . $options->location->lng,
+            // toLatLngString() forces fixed-point notation; raw float concat emits
+            // scientific notation for near-zero coords (e.g. -0.00005 → "-5.0E-5"),
+            // which Google rejects.
+            'latlng' => $options->location->toLatLngString(),
             'key' => $this->config->apiKey,
         ];
 

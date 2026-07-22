@@ -79,10 +79,20 @@ final class HereRoutingConnector extends BaseConnector implements RoutingConnect
         // second call (the bug fixed); but an explicitly-set fixed flag
         // (origin/destination) IS an explicit optimize request and DOES fire,
         // matching the TS connector exactly.
+        // HERE findsequence2 optimizes an OPEN route (fixed first/last waypoint); it
+        // cannot return a closed round trip. Surface the unsupported flag instead of
+        // silently returning an open route.
+        if ($options->isRoundTrip) {
+            throw new ConnectorError(
+                statusCode: null,
+                providerCode: ProviderCode::UnsupportedOption,
+                providerMessage: 'HERE findsequence2 optimizes an open route (fixed first/last waypoint) and cannot return a closed round trip; remove isRoundTrip or use a provider that supports it (e.g. Mapbox/OSRM).',
+            );
+        }
+
         $useOptimization = $options->optimize
             || $options->optimizeFixedOrigin
-            || $options->optimizeFixedDestination
-            || $options->isRoundTrip;
+            || $options->optimizeFixedDestination;
 
         $orderedWaypoints = $waypoints;
         $waypointOrder = null;
@@ -247,19 +257,21 @@ final class HereRoutingConnector extends BaseConnector implements RoutingConnect
         ];
 
         if ($options->departureTime !== null) {
-            $query['departureTime'] = $options->departureTime->format('c');
+            // findsequence2 documents the departure-time param as `departure`
+            // (ISO 8601); `departureTime` is not recognized and was silently
+            // ignored, so traffic-aware sequencing never took effect.
+            $query['departure'] = $options->departureTime->format('c');
         }
 
-        $url = self::SEQUENCE_URL;
-        if ($intermediates !== []) {
-            $destPairs = [];
-            foreach ($intermediates as $i => $wp) {
-                $destPairs[] = 'destination' . ($i + 1) . '=' . rawurlencode($wp->toLatLngString());
-            }
-            $url .= '?' . implode('&', $destPairs);
+        foreach ($intermediates as $i => $wp) {
+            $query['destination' . ($i + 1)] = $wp->toLatLngString();
         }
 
-        $response = $this->sendGet($url, [], $query);
+        // Merge `_passthrough` (query + headers) into this leg too — it was
+        // silently dropped, so a consumer could not tune the sequence request.
+        $merged = Passthrough::merge([], [], $query, $this->buildPassthroughBuckets($options));
+
+        $response = $this->sendGet(self::SEQUENCE_URL, $merged['headers'], $merged['query']);
 
         if ($response->getStatusCode() >= 300) {
             $this->raiseHttpError($response, 'HERE Waypoints Sequence');

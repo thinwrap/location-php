@@ -125,28 +125,28 @@ final class OsrmRoutingConnectorTest extends TestCase
     }
 
     #[Test]
-    public function routeRejectsInvalidTripComboAsInvalidRequest(): void
+    public function routeRemapsOpenOptimizeComboToFirstLast(): void
     {
-        // `optimize=true` + `optimizeFixedOrigin=false` + `optimizeFixedDestination=false`
-        // + `isRoundTrip=false` => OSRM /trip with source=any, destination=any,
-        // roundtrip=false (the explicitly unsupported combo).
-        $connector = self::makeConnector(self::failingClient());
+        // `optimize=true` + neither endpoint fixed + `isRoundTrip=false` would be
+        // OSRM /trip with source=any, destination=any, roundtrip=false — the combo
+        // OSRM rejects with HTTP 400. It is remapped to source=first/destination=last
+        // (open route, endpoints kept, middle reordered), matching the Mapbox v1 sibling.
+        $recorder = self::recordingClient(self::happyTripResponse());
+        $connector = self::makeConnector($recorder);
 
-        try {
-            $connector->route(new RoutingOptions(
-                waypoints: [new LatLng(0, 0), new LatLng(1, 1), new LatLng(2, 2)],
-                optimize: true,
-                optimizeFixedOrigin: false,
-                optimizeFixedDestination: false,
-                isRoundTrip: false,
-            ));
-            self::fail('Expected ConnectorError');
-        } catch (ConnectorError $error) {
-            self::assertNull($error->statusCode);
-            self::assertSame(ProviderCode::InvalidRequest, $error->providerCode);
-            self::assertNotNull($error->providerMessage);
-            self::assertStringContainsString('optimizeFixedOrigin', $error->providerMessage);
-        }
+        $connector->route(new RoutingOptions(
+            waypoints: [new LatLng(0, 0), new LatLng(1, 1), new LatLng(2, 2)],
+            optimize: true,
+            optimizeFixedOrigin: false,
+            optimizeFixedDestination: false,
+            isRoundTrip: false,
+        ));
+
+        self::assertNotNull($recorder->captured);
+        $uri = (string) $recorder->captured->getUri();
+        self::assertStringContainsString('source=first', $uri);
+        self::assertStringContainsString('destination=last', $uri);
+        self::assertStringContainsString('roundtrip=false', $uri);
     }
 
     #[Test]

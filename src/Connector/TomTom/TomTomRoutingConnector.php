@@ -86,6 +86,16 @@ final class TomTomRoutingConnector extends BaseConnector implements RoutingConne
             'routeType'  => 'fastest',
         ];
 
+        // TomTom computeBestOrder reorders intermediate waypoints while keeping the
+        // first/last fixed (an OPEN route); it has no closed round-trip mode.
+        if ($options->isRoundTrip) {
+            throw new ConnectorError(
+                statusCode: null,
+                providerCode: ProviderCode::UnsupportedOption,
+                providerMessage: 'TomTom computeBestOrder optimizes an open route (fixed first/last waypoint) and cannot return a closed round trip; remove isRoundTrip or use a provider that supports it (e.g. Mapbox/OSRM).',
+            );
+        }
+
         if ($options->optimize && count($waypoints) > 2) {
             $query['computeBestOrder'] = 'true';
         }
@@ -155,7 +165,7 @@ final class TomTomRoutingConnector extends BaseConnector implements RoutingConne
 
         $waypointOrder = null;
         if ($options->optimize && isset($data['optimizedWaypoints']) && is_array($data['optimizedWaypoints'])) {
-            $waypointOrder = $this->extractWaypointOrder($data['optimizedWaypoints']);
+            $waypointOrder = $this->extractWaypointOrder($data['optimizedWaypoints'], count($options->waypoints));
         }
 
         return new RoutingResult(
@@ -169,13 +179,17 @@ final class TomTomRoutingConnector extends BaseConnector implements RoutingConne
     }
 
     /**
-     * Sort `optimizedWaypoints[]` by `optimizedIndex` and project to
-     * `providedIndex`.
+     * Project TomTom's intermediate-relative `optimizedWaypoints` onto the full
+     * input-index visiting sequence. `optimizedWaypoints` covers ONLY the
+     * intermediate waypoints (`providedIndex` 0-based over intermediates,
+     * origin and destination excluded); the canonical `waypointOrder` brackets
+     * the projected intermediates with the fixed origin (0) and
+     * destination (`$n - 1`).
      *
      * @param list<mixed>|array<int|string, mixed> $optimized
      * @return list<int>
      */
-    private function extractWaypointOrder(array $optimized): array
+    private function extractWaypointOrder(array $optimized, int $n): array
     {
         /** @var list<array{providedIndex: int, optimizedIndex: int}> $entries */
         $entries = [];
@@ -203,13 +217,15 @@ final class TomTomRoutingConnector extends BaseConnector implements RoutingConne
             static fn(array $a, array $b): int => $a['optimizedIndex'] <=> $b['optimizedIndex'],
         );
 
-        return array_map(
+        $intermediates = array_map(
             /**
              * @param array{providedIndex: int, optimizedIndex: int} $entry
              */
-            static fn(array $entry): int => $entry['providedIndex'],
+            static fn(array $entry): int => $entry['providedIndex'] + 1,
             $entries,
         );
+
+        return array_merge([0], $intermediates, [$n - 1]);
     }
 
     private function buildAvoid(RoutingOptions $options): string

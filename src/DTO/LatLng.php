@@ -105,7 +105,7 @@ final readonly class LatLng
     {
         $this->assertFinite('formatLng');
 
-        return (string) $this->lng;
+        return self::fmtCoord($this->lng);
     }
 
     /**
@@ -116,7 +116,7 @@ final readonly class LatLng
     {
         $this->assertFinite('formatLat');
 
-        return (string) $this->lat;
+        return self::fmtCoord($this->lat);
     }
 
     /**
@@ -132,13 +132,38 @@ final readonly class LatLng
     {
         $this->assertFinite('toLatLngString');
 
-        return "{$this->lat},{$this->lng}";
+        return self::fmtCoord($this->lat) . ',' . self::fmtCoord($this->lng);
     }
 
     public function toLngLatString(): string
     {
         $this->assertFinite('toLngLatString');
 
-        return "{$this->lng},{$this->lat}";
+        return self::fmtCoord($this->lng) . ',' . self::fmtCoord($this->lat);
+    }
+
+    /**
+     * Format a single coordinate component as a fixed-notation wire string.
+     *
+     * PHP's default `(string) $float` cast emits scientific notation for
+     * near-zero magnitudes (e.g. `(string) 0.00001 === "1.0E-5"`), which
+     * location providers reject in a URL/param and which diverges from the
+     * JS/Go/Python siblings' fixed-point wire format. `%.8F` forces fixed
+     * notation (8 fractional digits ≈ ~1 mm at the equator — well beyond any
+     * geographic precision); trailing zeros and a bare trailing `.` are trimmed
+     * so normal coordinates are byte-identical to the old cast
+     * (`0.00001` → `"0.00001"`, `40.7128` → `"40.7128"`, `-74.0` → `"-74"`).
+     *
+     * Callers guard finiteness via {@see assertFinite()} first, so NaN/INF
+     * never reach here.
+     */
+    private static function fmtCoord(float $v): string
+    {
+        // Whole-number fast-path keeps integral coordinates compact ("-74" not "-74.0").
+        if ($v === floor($v) && abs($v) < 1e15) {
+            return (string) (int) $v;
+        }
+
+        return rtrim(rtrim(sprintf('%.8F', $v), '0'), '.');
     }
 }

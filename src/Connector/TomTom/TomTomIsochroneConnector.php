@@ -87,7 +87,11 @@ final class TomTomIsochroneConnector extends BaseConnector implements IsochroneC
         // reject non-finite center before it reaches the URL path.
         $options->center->assertFinite('TomTom isochrone center');
 
-        $baseUrl = self::REACHABLE_RANGE_URL . "/{$options->center->lat},{$options->center->lng}/json";
+        // fmtCoord (via format*()) keeps near-zero coords in fixed notation —
+        // a raw "{$lat}" cast would emit "1.0E-5" for 0.00001, which TomTom
+        // rejects in the path segment.
+        $baseUrl = self::REACHABLE_RANGE_URL . '/'
+            . $options->center->formatLat() . ',' . $options->center->formatLng() . '/json';
         $travelMode = $this->mapTravelMode($options->travelMode);
 
         $datas = [];

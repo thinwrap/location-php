@@ -174,8 +174,10 @@ final class TomTomGeocodingConnector extends BaseConnector implements GeocodingC
         if ($options->location !== null) {
             // reject non-finite before it reaches the query string.
             $options->location->assertFinite('TomTom autocomplete location');
-            $query['lat'] = (string) $options->location->lat;
-            $query['lon'] = (string) $options->location->lng;
+            // formatLat/Lng force fixed-point notation; a raw (string) cast emits
+            // scientific notation for near-zero coords (e.g. -0.00005 → "-5.0E-5").
+            $query['lat'] = $options->location->formatLat();
+            $query['lon'] = $options->location->formatLng();
         }
         if ($options->radius !== null) {
             $query['radius'] = (string) $options->radius;

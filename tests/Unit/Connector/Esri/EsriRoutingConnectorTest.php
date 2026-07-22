@@ -18,6 +18,7 @@ use Thinwrap\Location\ConnectorError;
 use Thinwrap\Location\DTO\LatLng;
 use Thinwrap\Location\DTO\Routing\RoutingOptions;
 use Thinwrap\Location\Enum\ProviderCode;
+use Thinwrap\Location\Enum\TravelMode;
 
 final class EsriRoutingConnectorTest extends TestCase
 {
@@ -340,8 +341,120 @@ final class EsriRoutingConnectorTest extends TestCase
         $form = [];
         parse_str((string) $recorder->captured->getBody(), $form);
         self::assertSame('true', $form['findBestSequence']);
+        self::assertSame('true', $form['returnStops']);
         self::assertSame('true', $form['preserveFirstStop']);
         self::assertSame('true', $form['preserveLastStop']);
+    }
+
+    #[Test]
+    public function routeDerivesWaypointOrderFromStopsSequence(): void
+    {
+        // `stops` FeatureSet is returned in INPUT order; Sequence is the 1-based
+        // visiting position. Sequences [1,3,2,4] invert to canonical [0,2,1,3].
+        $connector = self::makeConnector(self::respondingClient(new Response(200, [], (string) json_encode([
+            'routes' => ['features' => [[
+                'attributes' => ['Total_Length' => 1000.0, 'Total_Time' => 20.0],
+                'geometry' => ['paths' => [[[0, 0], [3, 3]]]],
+            ]]],
+            'stops' => ['features' => [
+                ['attributes' => ['Name' => 'Location 1', 'ObjectID' => 1, 'Sequence' => 1]],
+                ['attributes' => ['Name' => 'Location 2', 'ObjectID' => 2, 'Sequence' => 3]],
+                ['attributes' => ['Name' => 'Location 3', 'ObjectID' => 3, 'Sequence' => 2]],
+                ['attributes' => ['Name' => 'Location 4', 'ObjectID' => 4, 'Sequence' => 4]],
+            ]],
+        ]))));
+
+        $result = $connector->route(new RoutingOptions(
+            waypoints: [new LatLng(0, 0), new LatLng(1, 1), new LatLng(2, 2), new LatLng(3, 3)],
+            optimize: true,
+        ));
+
+        self::assertSame([0, 2, 1, 3], $result->waypointOrder);
+    }
+
+    #[Test]
+    public function routeSendsFullWalkingTravelModeObject(): void
+    {
+        $recorder = self::recordingClient(new Response(200, [], (string) json_encode([
+            'routes' => ['features' => [[
+                'attributes' => ['Total_Length' => 1.0, 'Total_Time' => 1.0],
+                'geometry' => ['paths' => [[[0, 0], [1, 1]]]],
+            ]]],
+        ])));
+
+        $connector = self::makeConnector($recorder);
+        $connector->route(new RoutingOptions(
+            waypoints: [new LatLng(0, 0), new LatLng(1, 1)],
+            travelMode: TravelMode::Walking,
+        ));
+
+        self::assertNotNull($recorder->captured);
+        $form = [];
+        parse_str((string) $recorder->captured->getBody(), $form);
+        // ArcGIS requires a full travel-mode JSON object, not a name string.
+        self::assertIsString($form['travelMode'] ?? null);
+        /** @var array<string,mixed> $travelMode */
+        $travelMode = json_decode((string) $form['travelMode'], true, 512, JSON_THROW_ON_ERROR);
+        self::assertSame('WALK', $travelMode['type']);
+        self::assertSame('WalkTime', $travelMode['impedanceAttributeName']);
+        self::assertSame('Walking Time', $travelMode['name']);
+    }
+
+    #[Test]
+    public function routeDerivesTotalsFromDirectionsSummaryForWalking(): void
+    {
+        // Real ArcGIS walking response: no Total_Time / Total_Length; the
+        // impedance attribute is Total_WalkTime, and reliable totals live in
+        // directions[0].summary (meters + minutes). The pre-fix connector read
+        // Total_Time first and reported duration 0. Live values from
+        // route-api.arcgis.com (2026-07-21).
+        $json = (string) json_encode([
+            'routes' => ['features' => [[
+                'attributes' => [
+                    'Total_WalkTime'   => 13.094903051108146,
+                    'Total_Kilometers' => 1.091226960340165,
+                    'Total_Miles'      => 0.6780697279993455,
+                ],
+                'geometry' => ['paths' => [[[0, 0], [1, 1]]]],
+            ]]],
+            'directions' => [[
+                'summary' => [
+                    'totalLength'    => 1091.226960340165,
+                    'totalTime'      => 13.094903051108146,
+                    'totalDriveTime' => 13.094903051108146,
+                ],
+                'features' => [
+                    ['attributes' => ['maneuverType' => 'esriDMTStop', 'length' => 0, 'time' => 0]],
+                    ['attributes' => ['maneuverType' => 'esriDMTStraight', 'length' => 1091.226960340165, 'time' => 13.094903051108146]],
+                    ['attributes' => ['maneuverType' => 'esriDMTStop', 'length' => 0, 'time' => 0]],
+                ],
+            ]],
+        ]);
+
+        $connector = self::makeConnector(self::respondingClient(new Response(200, [], $json)));
+        $result = $connector->route(new RoutingOptions(
+            waypoints: [new LatLng(0, 0), new LatLng(1, 1)],
+            travelMode: TravelMode::Walking,
+        ));
+
+        self::assertEqualsWithDelta(1091.23, $result->totalDistanceMeters, 0.1);
+        self::assertEqualsWithDelta(13.094903051108146 * 60, $result->totalDurationSeconds, 0.001);
+    }
+
+    #[Test]
+    public function routeRejectsCyclingWithUnsupportedTravelMode(): void
+    {
+        $connector = self::makeConnector(self::respondingClient(new Response(200, [], '{}')));
+
+        try {
+            $connector->route(new RoutingOptions(
+                waypoints: [new LatLng(0, 0), new LatLng(1, 1)],
+                travelMode: TravelMode::Cycling,
+            ));
+            self::fail('Expected ConnectorError.');
+        } catch (ConnectorError $e) {
+            self::assertSame(ProviderCode::UnsupportedTravelMode, $e->providerCode);
+        }
     }
 
     #[Test]

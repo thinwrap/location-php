@@ -177,7 +177,7 @@ locked at v1.0.
 - PHP 8.2 minimum; PHPStan level 8 expected for consumer code that uses union-typed config narrowing.
 - Runs on PHP 8.2, 8.3, and 8.4 (CI matrix; Linux only at v1.0 — Windows / macOS deferred to v1.1).
 - `declare(strict_types=1)` is required on every file in this library and recommended for consumer code.
-- Zero runtime dependencies beyond `psr/http-client` + `psr/http-factory` + `php-http/discovery`. No vendor SDKs.
+- Only three runtime dependencies — `psr/http-client` + `psr/http-factory` (interfaces) and `php-http/discovery`, which auto-wires a PSR-18 client when none is injected. No vendor SDKs.
 - Server-only. Most providers require server-only secrets — there is no browser story.
 
 ## Public API surface (locked at v1.0)

@@ -110,8 +110,18 @@ final class OsrmRoutingConnector extends BaseConnector implements RoutingConnect
         if (!$useTrip) {
             $query['alternatives'] = 'false';
         } else {
-            $query['source']      = $options->optimizeFixedOrigin ? 'first' : 'any';
-            $query['destination'] = $options->optimizeFixedDestination ? 'last' : 'any';
+            $source      = $options->optimizeFixedOrigin ? 'first' : 'any';
+            $destination = $options->optimizeFixedDestination ? 'last' : 'any';
+            // OSRM rejects source=any + destination=any with roundtrip=false
+            // (HTTP 400 NotImplemented). A plain `optimize` (neither endpoint
+            // fixed, open route) therefore keeps the input's first & last fixed
+            // and reorders the middle — matching the Mapbox Optimization v1 sibling.
+            if (!$options->isRoundTrip && $source === 'any' && $destination === 'any') {
+                $source      = 'first';
+                $destination = 'last';
+            }
+            $query['source']      = $source;
+            $query['destination'] = $destination;
             $query['roundtrip']   = $options->isRoundTrip ? 'true' : 'false';
         }
 
@@ -226,28 +236,11 @@ final class OsrmRoutingConnector extends BaseConnector implements RoutingConnect
             }
         }
 
-        // Invalid `/trip` combo bullet 3:
-        // `source=any, destination=any, roundtrip=false` is unsupported by
-        // OSRM. Reachable only when dispatching to `/trip` (TS-identical
-        // `$useTrip` derivation: any optimization flag) with no fixed endpoint
-        // and no roundtrip.
-        $useTrip = $options->optimize
-            || $options->optimizeFixedOrigin
-            || $options->optimizeFixedDestination
-            || $options->isRoundTrip;
-
-        if (
-            $useTrip
-            && $options->isRoundTrip === false
-            && $options->optimizeFixedOrigin === false
-            && $options->optimizeFixedDestination === false
-        ) {
-            throw new ConnectorError(
-                statusCode: null,
-                providerCode: ProviderCode::InvalidRequest,
-                providerMessage: 'When isRoundTrip=false, OSRM /trip requires optimizeFixedOrigin or optimizeFixedDestination',
-            );
-        }
+        // NOTE: the previous "invalid /trip combo" preflight is gone. It rejected
+        // source=any/destination=any/roundtrip=false, but the query builder no
+        // longer emits that combo — a plain `optimize` maps to
+        // source=first/destination=last (open route, endpoints kept, middle
+        // reordered), which OSRM accepts (see the $useTrip query block above).
     }
 
     /**

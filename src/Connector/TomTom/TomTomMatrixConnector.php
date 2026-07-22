@@ -35,7 +35,7 @@ use Thinwrap\Location\Util\Passthrough;
  *   - `> 2500` → submit-poll-retrieve via `/routing/matrix/2/async`:
  *       1. `POST /async?key=…` returns `{ jobId }`.
  *       2. `GET /async/{jobId}?key=…` is polled with exponential backoff
- *          (1s start, ×1.5, capped at 5s) until `state === 'Succeeded'`,
+ *          (1s start, ×1.5, capped at 5s) until `state === 'Completed'`,
  *          `state === 'Failed'`, or the 60s deadline expires.
  *       3. `GET /async/{jobId}/result?key=…` retrieves the same `data[]` shape
  *          as the sync path.
@@ -176,7 +176,7 @@ final class TomTomMatrixConnector extends BaseConnector implements MatrixConnect
     }
 
     /**
-     * Step 2: poll the async job until `Succeeded`, `Failed`, or deadline.
+     * Step 2: poll the async job until `Completed`, `Failed`, or deadline.
      *
      * Raises {@see ProviderCode::MatrixPollingTimeout} on deadline expiry with
      * `cause.jobId` so callers can resume out-of-band.
@@ -213,7 +213,9 @@ final class TomTomMatrixConnector extends BaseConnector implements MatrixConnect
                 ? $status['state']
                 : null;
 
-            if ($state === 'Succeeded') {
+            // TomTom Matrix v2 async job states are Submitted | Validated |
+            // Completed | Failed. Success is 'Completed' (there is no 'Succeeded').
+            if ($state === 'Completed') {
                 return;
             }
 

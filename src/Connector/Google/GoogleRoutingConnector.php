@@ -77,14 +77,22 @@ final class GoogleRoutingConnector extends BaseConnector implements RoutingConne
             $intermediates[] = ['location' => ['latLng' => ['latitude' => $wp->lat, 'longitude' => $wp->lng]]];
         }
 
+        $travelMode = $this->mapTravelMode($options->travelMode);
+
         /** @var array<string, mixed> $body */
         $body = [
             'origin' => $origin,
             'destination' => $destination,
-            'travelMode' => $this->mapTravelMode($options->travelMode),
-            'routingPreference' => $options->departureTime !== null ? 'TRAFFIC_AWARE' : 'TRAFFIC_UNAWARE',
+            'travelMode' => $travelMode,
             'polylineEncoding' => 'ENCODED_POLYLINE',
         ];
+
+        // Google rejects `routingPreference` for WALK/BICYCLE ("Routing
+        // preference cannot be set for WALK or BICYCLE routing mode.") — only
+        // DRIVE and TWO_WHEELER accept it. Overridable via `_passthrough`.
+        if ($travelMode === 'DRIVE' || $travelMode === 'TWO_WHEELER') {
+            $body['routingPreference'] = $options->departureTime !== null ? 'TRAFFIC_AWARE' : 'TRAFFIC_UNAWARE';
+        }
 
         if ($intermediates !== []) {
             $body['intermediates'] = $intermediates;

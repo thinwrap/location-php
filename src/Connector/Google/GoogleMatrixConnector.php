@@ -64,13 +64,21 @@ final class GoogleMatrixConnector extends BaseConnector implements MatrixConnect
             $destinations[] = ['waypoint' => ['location' => ['latLng' => ['latitude' => $d->lat, 'longitude' => $d->lng]]]];
         }
 
+        $travelMode = $this->mapTravelMode($options->travelMode);
+
         /** @var array<string, mixed> $body */
         $body = [
             'origins' => $origins,
             'destinations' => $destinations,
-            'travelMode' => $this->mapTravelMode($options->travelMode),
-            'routingPreference' => $options->departureTime !== null ? 'TRAFFIC_AWARE' : 'TRAFFIC_UNAWARE',
+            'travelMode' => $travelMode,
         ];
+
+        // Google rejects `routingPreference` for WALK/BICYCLE ("Routing
+        // preference cannot be set for WALK or BICYCLE routing mode.") — only
+        // DRIVE and TWO_WHEELER accept it. Overridable via `_passthrough`.
+        if ($travelMode === 'DRIVE' || $travelMode === 'TWO_WHEELER') {
+            $body['routingPreference'] = $options->departureTime !== null ? 'TRAFFIC_AWARE' : 'TRAFFIC_UNAWARE';
+        }
 
         if ($options->avoidTolls) {
             $body['routeModifiers'] = ['avoidTolls' => true];
@@ -83,7 +91,7 @@ final class GoogleMatrixConnector extends BaseConnector implements MatrixConnect
         /** @var array<string, string> $headers */
         $headers = [
             'X-Goog-Api-Key' => $this->config->apiKey,
-            'X-Goog-FieldMask' => 'originIndex,destinationIndex,distanceMeters,duration,status',
+            'X-Goog-FieldMask' => 'originIndex,destinationIndex,distanceMeters,duration,status,condition',
         ];
 
         $merged = Passthrough::merge($body, $headers, [], $this->buildPassthroughBuckets($options));
@@ -387,12 +395,19 @@ final class GoogleMatrixConnector extends BaseConnector implements MatrixConnect
         }
         if (isset($status['code'])) {
             $code = $status['code'];
-            if (is_int($code)) {
-                return $code === 0;
+            if (is_int($code) && $code !== 0) {
+                return false;
             }
-            if (is_numeric($code)) {
-                return (int) $code === 0;
+            if (is_numeric($code) && (int) $code !== 0) {
+                return false;
             }
+        }
+
+        // `condition` is independent of `status`: an element can be status-OK
+        // with `ROUTE_NOT_FOUND` and no distanceMeters/duration. Treat anything
+        // other than ROUTE_EXISTS (when present) as a failed cell.
+        if (isset($el['condition']) && $el['condition'] !== 'ROUTE_EXISTS') {
+            return false;
         }
 
         return true;

@@ -129,10 +129,9 @@ final class MapboxRoutingConnectorTest extends TestCase
     }
 
     #[Test]
-    public function routeDispatchesToOptimizedTripsV2WhenOptimizeOrRoundTripSet(): void
+    public function routeDispatchesToOptimizedTripsV1WhenOptimizeOrRoundTripSet(): void
     {
-        // Only `optimize` and `isRoundTrip` trigger the optimized branch — the
-        // fixedOrigin/fixedDestination flags merely modulate it.
+        // Any optimization flag triggers the GET /optimized-trips/v1 branch.
         $cases = [
             ['optimize' => true,  'optimizeFixedOrigin' => false, 'optimizeFixedDestination' => false, 'isRoundTrip' => false],
             ['optimize' => false, 'optimizeFixedOrigin' => false, 'optimizeFixedDestination' => false, 'isRoundTrip' => true],
@@ -152,15 +151,13 @@ final class MapboxRoutingConnectorTest extends TestCase
             ));
 
             self::assertNotNull($recorder->captured);
-            self::assertSame('POST', $recorder->captured->getMethod());
+            self::assertSame('GET', $recorder->captured->getMethod());
             $uri = (string) $recorder->captured->getUri();
-            self::assertStringStartsWith('https://api.mapbox.com/optimized-trips/v2', $uri);
-
-            /** @var array<string, mixed> $body */
-            $body = json_decode((string) $recorder->captured->getBody(), true) ?? [];
-            self::assertArrayHasKey('coordinates', $body);
-            self::assertSame('driving', $body['profile']);
-            self::assertSame($case['isRoundTrip'], $body['roundtrip']);
+            self::assertStringStartsWith('https://api.mapbox.com/optimized-trips/v1/mapbox/', $uri);
+            // Coordinates ride in the path (lng,lat;…), not a POST body.
+            self::assertStringContainsString('/driving/0,0;1,1;2,2', rawurldecode($uri));
+            parse_str((string) parse_url($uri, PHP_URL_QUERY), $q);
+            self::assertSame($case['isRoundTrip'] ? 'true' : 'false', $q['roundtrip']);
         }
     }
 
@@ -169,22 +166,21 @@ final class MapboxRoutingConnectorTest extends TestCase
     {
         $factory = new HttpFactory();
 
-        // optimize=true with fixed-origin only.
+        // fixed-origin only → pin source, free destination.
         $recorder = self::recordingClient(self::okResponse(trips: true));
         $connector = new MapboxRoutingConnector(new MapboxConfig(accessToken: 'k'), $recorder, $factory, $factory);
         $connector->route(new RoutingOptions(
             waypoints: [new LatLng(0, 0), new LatLng(1, 1), new LatLng(2, 2)],
-            optimize: true,
             optimizeFixedOrigin: true,
             optimizeFixedDestination: false,
         ));
         self::assertNotNull($recorder->captured);
-        /** @var array<string, mixed> $body */
-        $body = json_decode((string) $recorder->captured->getBody(), true) ?? [];
-        self::assertSame('first', $body['source']);
-        self::assertSame('any', $body['destination']);
+        parse_str((string) parse_url((string) $recorder->captured->getUri(), PHP_URL_QUERY), $q);
+        self::assertSame('first', $q['source']);
+        self::assertSame('any', $q['destination']);
 
-        // optimize=true with no fixed endpoints → fully-optimized.
+        // plain optimize (no fixed endpoints): v1 rejects any/any + roundtrip=false,
+        // so keep BOTH endpoints and reorder the middle (matches the siblings).
         $recorder = self::recordingClient(self::okResponse(trips: true));
         $connector = new MapboxRoutingConnector(new MapboxConfig(accessToken: 'k'), $recorder, $factory, $factory);
         $connector->route(new RoutingOptions(
@@ -194,27 +190,23 @@ final class MapboxRoutingConnectorTest extends TestCase
             optimizeFixedDestination: false,
         ));
         self::assertNotNull($recorder->captured);
-        /** @var array<string, mixed> $body */
-        $body = json_decode((string) $recorder->captured->getBody(), true) ?? [];
-        self::assertSame('any', $body['source']);
-        self::assertSame('any', $body['destination']);
+        parse_str((string) parse_url((string) $recorder->captured->getUri(), PHP_URL_QUERY), $q);
+        self::assertSame('first', $q['source']);
+        self::assertSame('last', $q['destination']);
+        self::assertSame('false', $q['roundtrip']);
 
-        // isRoundTrip=true alone.
+        // isRoundTrip=true → roundtrip=true, source=first (returns to first waypoint).
         $recorder = self::recordingClient(self::okResponse(trips: true));
         $connector = new MapboxRoutingConnector(new MapboxConfig(accessToken: 'k'), $recorder, $factory, $factory);
         $connector->route(new RoutingOptions(
             waypoints: [new LatLng(0, 0), new LatLng(1, 1), new LatLng(2, 2)],
             optimize: false,
             isRoundTrip: true,
-            optimizeFixedOrigin: true,
-            optimizeFixedDestination: true,
         ));
         self::assertNotNull($recorder->captured);
-        /** @var array<string, mixed> $body */
-        $body = json_decode((string) $recorder->captured->getBody(), true) ?? [];
-        self::assertTrue($body['roundtrip']);
-        self::assertSame('first', $body['source']);
-        self::assertSame('last', $body['destination']);
+        parse_str((string) parse_url((string) $recorder->captured->getUri(), PHP_URL_QUERY), $q);
+        self::assertSame('true', $q['roundtrip']);
+        self::assertSame('first', $q['source']);
     }
 
     #[Test]

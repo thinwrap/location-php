@@ -160,11 +160,19 @@ final class OsrmMatrixConnector extends BaseConnector implements MatrixConnector
             $distanceRow = is_array($distances[$oi] ?? null) ? $distances[$oi] : [];
 
             for ($di = 0; $di < $destinationCount; $di++) {
+                $distance = $distanceRow[$di] ?? null;
+                $duration = $durationRow[$di] ?? null;
+                // OSRM `/table` returns `null` for an unroutable pair. Omit the
+                // cell rather than coercing to 0 (which reads as "same
+                // location"). Contract: missing/failed entries are omitted.
+                if ($distance === null || $duration === null) {
+                    continue;
+                }
                 $cells[] = new MatrixCell(
                     originIndex: $oi,
                     destinationIndex: $di,
-                    distanceMeters: self::toFloat($distanceRow[$di] ?? 0),
-                    durationSeconds: self::toFloat($durationRow[$di] ?? 0),
+                    distanceMeters: self::toFloat($distance),
+                    durationSeconds: self::toFloat($duration),
                 );
             }
         }

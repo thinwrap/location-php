@@ -77,7 +77,11 @@ final class MapboxIsochroneConnector extends BaseConnector implements IsochroneC
         $options->center->assertFinite('Mapbox isochrone center');
 
         $profile = $this->mapProfile($options->travelMode);
-        $url = self::ISOCHRONE_URL . "/{$profile}/{$options->center->lng},{$options->center->lat}";
+        // fmtCoord (via format*()) keeps near-zero coords in fixed notation —
+        // a raw "{$lng}" cast would emit "1.0E-5" for 0.00001, which Mapbox
+        // rejects in the path segment.
+        $url = self::ISOCHRONE_URL . "/{$profile}/"
+            . $options->center->formatLng() . ',' . $options->center->formatLat();
 
         /** @var array<string,string|int|float|bool> $baseQuery */
         $baseQuery = [
