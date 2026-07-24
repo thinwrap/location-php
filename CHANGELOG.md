@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-07-24
+
+### Added
+
+- **ESRI walking travel mode.** `TravelMode::Walking` now selects ESRI's
+  pedestrian network across routing, matrix, and isochrone by sending the full
+  ArcGIS "Walking Time" travel-mode object — a bare `"Walking"` string is
+  ignored by the service, which stays on the default driving impedance. The
+  mode-dependent impedance column (`WalkTime`) is read back correctly.
+  `TravelMode::Cycling` raises `unsupported_travel_mode`; ArcGIS's World
+  network services do not provide a cycling mode.
+
+### Changed
+
+- **HERE Matrix (v8)** requests `Accept-Encoding: gzip` (HERE returns 406
+  without it) and defensively `gzdecode()`s the matrix payload only when the
+  bytes are actually gzip-compressed, so it works whether or not the PSR-18
+  client already inflated the response.
+
+### Fixed
+
+- **ESRI OD cost matrix** now sends valid `origins` / `destinations` FeatureSets
+  and reads the real `Total_TravelTime` / `Total_Kilometers` output attributes
+  (kilometres converted to metres), replacing a malformed request/response path
+  that returned no usable results.
+- **Connector hardening (second review pass)** across the ESRI, Google, HERE,
+  Mapbox, OSRM, and TomTom connectors — malformed-`200`-response guards and
+  coordinate finiteness validation so every failure surfaces as a
+  `ConnectorError`.
+
 ## [1.0.1] — 2026-07-20
 
 ### Changed
